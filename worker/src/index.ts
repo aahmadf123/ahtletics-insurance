@@ -466,8 +466,11 @@ app.post('/api/requests', async c => {
         }
       } catch (dsErr) {
         console.error('DocuSign envelope creation failed:', dsErr);
-        // Continue — the in-app workflow still works as fallback
+        // Fail the request — DocuSign is required, no in-app fallback
+        return err(`Failed to create DocuSign envelope: ${dsErr instanceof Error ? dsErr.message : String(dsErr)}`, 502);
       }
+    } else {
+      return err('DocuSign is not configured', 500);
     }
 
     // Email notifications (still sent as a heads-up alongside DocuSign)
@@ -557,87 +560,7 @@ app.post('/api/requests/:id/signing-url', async c => {
   }
 });
 
-// POST /api/requests/:id/sign — in-app fallback (only when DocuSign envelope not present)
-app.post('/api/requests/:id/sign', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
-  if (!user) return err('Unauthorized', 401);
-  if (user.role === 'coach') return err('Coaches cannot sign at this stage', 403);
-
-  const { id } = c.req.param();
-  const ip = c.req.header('CF-Connecting-IP') ?? c.req.header('X-Forwarded-For') ?? 'unknown';
-
-  const req = await c.env.DB.prepare(`
-    SELECT ir.*, sp.name as sportName, sa.email as sportAdminEmail, sa.name as sportAdminName
-    FROM insurance_requests ir
-    LEFT JOIN sports_programs sp ON ir.sport = sp.id
-    LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
-    WHERE ir.id = ?
-  `).bind(id).first<Record<string, unknown> & { status: string; sport: string; sportName: string; sportAdminEmail: string | null; sportAdminName: string | null; coach_email: string; coach_name: string; rocket_number: string; student_name: string; term: string; premium_cost: number }>();
-
-  if (!req) return err('Not found', 404);
-
-  let sigRole: 'SPORT_ADMIN' | 'CFO';
-  let newStatus: string;
-
-  if (user.role === 'sport_admin') {
-    if (req.status !== 'PENDING_SPORT_ADMIN') return err('Not pending sport admin signature', 409);
-    // Verify this admin is assigned to the request's sport
-    const adminRow = await c.env.DB.prepare(
-      'SELECT id FROM sport_administrators WHERE email = ?'
-    ).bind(user.email).first<{ id: string }>();
-    const sportRow = await c.env.DB.prepare(
-      'SELECT sport_admin_id FROM sports_programs WHERE id = ?'
-    ).bind(req.sport).first<{ sport_admin_id: string | null }>();
-    if (!adminRow || !sportRow || sportRow.sport_admin_id !== adminRow.id) {
-      return err('Not authorized to sign requests for this sport', 403);
-    }
-    sigRole = 'SPORT_ADMIN';
-    newStatus = 'PENDING_CFO';
-  } else if (user.role === 'cfo') {
-    if (req.status !== 'PENDING_CFO' && !(req.status === 'PENDING_SPORT_ADMIN' && req.sport === 'womens_softball')) {
-      return err('Not pending CFO signature', 409);
-    }
-    sigRole = 'CFO';
-    newStatus = 'EXECUTED';
-  } else {
-    return err('Forbidden', 403);
-  }
-
-  await c.env.DB.prepare(`
-    INSERT INTO signatures (id, request_id, signatory_role, signatory_email, signatory_name, ip_address)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).bind(newUUID(), id, sigRole, user.email, user.name, ip).run();
-
-  await c.env.DB.prepare('UPDATE insurance_requests SET status = ? WHERE id = ?')
-    .bind(newStatus, id).run();
-
-  await c.env.DB.prepare(`
-    INSERT INTO audit_log (id, request_id, action, performed_by, details)
-    VALUES (?, ?, 'SIGNED', ?, ?)
-  `).bind(newUUID(), id, user.email, JSON.stringify({ role: sigRole, newStatus })).run();
-
-  const emailData = {
-    studentName: req.student_name as string,
-    rocketNumber: req.rocket_number as string,
-    sport: req.sport as string,
-    sportName: req.sportName as string,
-    term: req.term as string,
-    premiumCost: req.premium_cost as number,
-    coachName: req.coach_name as string,
-    coachEmail: req.coach_email as string,
-    requestId: id,
-    status: newStatus,
-    sportAdminName: req.sportAdminName as string ?? undefined,
-  };
-
-  if (newStatus === 'PENDING_CFO') {
-    await notifyPendingCFO(c.env, emailData);
-  } else if (newStatus === 'EXECUTED') {
-    await notifyExecuted(c.env, emailData, req.sportAdminEmail as string ?? undefined);
-  }
-
-  return json({ id, status: newStatus });
-});
+// (Old in-app /sign endpoint removed — all signing is done exclusively through DocuSign)
 
 // POST /api/requests/:id/void — CFO only
 app.post('/api/requests/:id/void', async c => {

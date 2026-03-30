@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { useAuth } from '../../lib/auth';
-import { getRequest, signRequest, voidRequest, getDocuSignUrl } from '../../lib/api';
+import { getRequest, voidRequest, getDocuSignUrl } from '../../lib/api';
 import { StatusBadge } from '../../components/StatusBadge';
 import type { RequestDetail } from '../../types';
 
@@ -28,25 +28,15 @@ export function RequestDetail() {
       .finally(() => setLoading(false));
   }, [id, searchParams.get('signed')]);
 
-  const handleSign = async () => {
+  const handleOpenDocuSign = async () => {
     if (!id) return;
     setSigning(true);
     setSigningError('');
-    setError('');
     try {
-      if (req?.envelopeId) {
-        // DocuSign embedded signing — redirect to DocuSign
-        const { url } = await getDocuSignUrl(id);
-        window.location.href = url;
-        return; // page will navigate away
-      }
-      // Fallback: in-app signature
-      await signRequest(id);
-      const updated = await getRequest(id);
-      setReq(updated);
+      const { url } = await getDocuSignUrl(id);
+      window.location.href = url;
     } catch (err: unknown) {
       setSigningError(err instanceof Error ? err.message : 'Could not open DocuSign');
-    } finally {
       setSigning(false);
     }
   };
@@ -68,18 +58,17 @@ export function RequestDetail() {
   if (loading) return <div className="page"><p className="muted">Loading…</p></div>;
   if (!req) return <div className="page"><p className="error">{error || 'Request not found.'}</p></div>;
 
-  const canSign =
-    (user?.role === 'sport_admin' && req.status === 'PENDING_SPORT_ADMIN') ||
-    (user?.role === 'cfo' && (req.status === 'PENDING_CFO' || (req.status === 'PENDING_SPORT_ADMIN' && req.sport === 'womens_softball')));
-
-  // Coach can re-open their DocuSign session from the detail page (recovery scenario)
+  // Coach can re-open their DocuSign session if they haven't signed yet
   const coachNeedsDocuSign =
     user?.role === 'coach' &&
     req.coachEmail === user?.email &&
     !!req.envelopeId &&
-    ['PENDING_SPORT_ADMIN', 'PENDING_CFO'].includes(req.status);
+    !req.signatures.some(s => s.signatoryEmail === user?.email && s.signatoryRole === 'COACH');
 
-  const alreadySigned = req.signatures.some(s => s.signatoryEmail === user?.email);
+  // Sport Admin / CFO sign entirely through DocuSign email — they see status info only
+  const pendingDocuSignFor =
+    (user?.role === 'sport_admin' && req.status === 'PENDING_SPORT_ADMIN') ||
+    (user?.role === 'cfo' && (req.status === 'PENDING_CFO' || (req.status === 'PENDING_SPORT_ADMIN' && req.sport === 'womens_softball')));
 
   return (
     <div className="page">
@@ -152,44 +141,27 @@ export function RequestDetail() {
       {coachNeedsDocuSign && (
         <div className="action-zone">
           <p className="action-note">
-            Your DocuSign signature is still required. Click below to open the DocuSign signing page.
+            Your DocuSign signature is still required. Click below to open the DocuSign signing page
+            where you can review and sign the authorization document.
           </p>
           {signingError && <p className="error">{signingError}</p>}
           <button
             className="btn btn-primary"
-            onClick={handleSign}
+            onClick={handleOpenDocuSign}
             disabled={signing}
           >
-            {signing ? 'Opening DocuSign…' : 'Complete My DocuSign Signature'}
+            {signing ? 'Opening DocuSign…' : 'Open DocuSign to Review & Sign'}
           </button>
         </div>
       )}
 
-      {canSign && !alreadySigned && (
+      {pendingDocuSignFor && (
         <div className="action-zone">
-          {req.envelopeId ? (
-            // Remote signing: DocuSign emails them directly — no app action needed
-            <p className="action-note">
-              A DocuSign signature request has been sent to your email address. Please check your
-              inbox (and spam folder) for an email from DocuSign and click the link to review and
-              sign the document.
-            </p>
-          ) : (
-            // In-app fallback when no DocuSign envelope exists
-            <>
-              <p className="action-note">
-                By clicking below, you are applying your digital signature to this request.
-              </p>
-              {signingError && <p className="error">{signingError}</p>}
-              <button
-                className="btn btn-primary"
-                onClick={handleSign}
-                disabled={signing}
-              >
-                {signing ? 'Applying Signature…' : 'Apply My Signature'}
-              </button>
-            </>
-          )}
+          <p className="action-note">
+            This request is awaiting your signature via DocuSign. You should have received an email
+            from DocuSign — please check your inbox (and spam folder) to review, preview, and sign
+            the authorization document directly in DocuSign.
+          </p>
         </div>
       )}
 

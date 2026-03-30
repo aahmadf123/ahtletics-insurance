@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../lib/auth';
 import { listSports, submitRequest } from '../../lib/api';
-import { DisclaimerCheckboxes } from '../../components/DisclaimerCheckboxes';
 import { PremiumDisplay } from '../../components/PremiumDisplay';
 import { TERM_OPTIONS } from '../../types';
 import type { SportProgram, AthleteEntry } from '../../types';
@@ -15,12 +14,6 @@ const TERMS = TERM_OPTIONS.map(t => ({
   premium: t.premium,
   termKey: t.label,
 }));
-
-const DEADLINES: Record<string, string> = {
-  Fall: `September 8, ${CURRENT_YEAR}`,
-  'Spring/Summer': `January 26, ${CURRENT_YEAR + 1}`,
-  Summer: `July 1, ${CURRENT_YEAR + 1}`,
-};
 
 function emptyAthlete(sportId?: string): AthleteEntry {
   return { studentName: '', rocketNumber: '', sport: sportId ?? '' };
@@ -38,7 +31,6 @@ export function NewRequest() {
   const [sports, setSports] = useState<SportProgram[]>([]);
   const [term, setTerm] = useState('');
   const [athletes, setAthletes] = useState<AthleteEntry[]>([emptyAthlete(user?.sportId)]);
-  const [disclaimerOk, setDisclaimerOk] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
@@ -53,8 +45,6 @@ export function NewRequest() {
   }
 
   const selectedTerm = TERMS.find(t => t.value === term);
-  const termKey = term.split(' ')[0] as string;
-  const deadline = DEADLINES[termKey] ?? '';
 
   const updateAthlete = (index: number, field: keyof AthleteEntry, value: string) => {
     setAthletes(prev => prev.map((a, i) => {
@@ -75,7 +65,7 @@ export function NewRequest() {
   const athletesValid = athletes.every(
     a => a.studentName.trim() && /^R\d{8}$/.test(a.rocketNumber) && (coachSportId || a.sport) && !a.rocketError
   );
-  const canSubmit = term && athletesValid && disclaimerOk;
+  const canSubmit = term && athletesValid;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -110,8 +100,8 @@ export function NewRequest() {
     <div className="page">
       <h1>New Insurance Request</h1>
       <p className="page-subtitle">
-        Complete all fields and check all three disclaimers. You will be redirected to DocuSign to
-        apply your signature. You may add multiple athletes in a single submission.
+        Complete all fields below. You will be redirected to DocuSign to review and sign the
+        authorization document. You may add multiple athletes in a single submission.
       </p>
 
       <form className="form-card" onSubmit={handleSubmit}>
@@ -213,14 +203,6 @@ export function NewRequest() {
             + Add Another Athlete
           </button>
         </fieldset>
-
-        {/* Disclaimers */}
-        {term && (
-          <fieldset className="fieldset">
-            <legend>Required Acknowledgments</legend>
-            <DisclaimerCheckboxes deadline={deadline} onChange={setDisclaimerOk} />
-          </fieldset>
-        )}
 
         {error && <p className="error">{error}</p>}
 
