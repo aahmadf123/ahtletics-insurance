@@ -28,7 +28,11 @@ const app = new Hono<{ Bindings: Env }>();
 // ── CORS ──────────────────────────────────────────────────────────────────────
 
 app.use('*', cors({
-  origin: (origin) => origin,
+  origin: origin =>
+    !origin ||
+    origin.startsWith('http://localhost') ||
+    origin === 'https://ahtletics-insurance.firas-azfar.workers.dev'
+      ? origin : null,
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
@@ -58,6 +62,8 @@ app.post('/auth/setup', async c => {
     email: string; password: string; name: string; role: string;
   }>();
   if (!email || !password || !name || !role) return err('Missing fields');
+  if (!['coach', 'sport_admin', 'cfo'].includes(role)) return err('Invalid role');
+  if (password.length < 8) return err('Password must be at least 8 characters');
   const existing = await c.env.DB.prepare('SELECT id FROM users LIMIT 1').first();
   if (existing) return err('Setup already complete', 403);
   const id = newUUID();
@@ -83,8 +89,8 @@ app.post('/auth/login', async c => {
   const { email, password } = await c.req.json<{ email: string; password: string }>();
   if (!email || !password) return err('Email and password required');
   const user = await c.env.DB.prepare(
-    'SELECT id, email, password_hash, name, role, sport_id FROM users WHERE email = ?'
-  ).bind(email.toLowerCase()).first<{ id: string; email: string; password_hash: string; name: string; role: string; sport_id: string | null }>();
+    'SELECT id, email, password_hash, name, role, sport_id, must_change_password FROM users WHERE email = ?'
+  ).bind(email.toLowerCase()).first<{ id: string; email: string; password_hash: string; name: string; role: string; sport_id: string | null; must_change_password: number }>();
   if (!user || !(await verifyPassword(password, user.password_hash))) {
     return err('Invalid email or password', 401);
   }
@@ -98,7 +104,10 @@ app.post('/auth/login', async c => {
     exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7,
   };
   const token = await signJWT(payload, c.env.JWT_SECRET);
-  return new Response(JSON.stringify({ id: user.id, email: user.email, name: user.name, role: user.role, sportId: user.sport_id }), {
+  return new Response(JSON.stringify({
+    id: user.id, email: user.email, name: user.name, role: user.role,
+    sportId: user.sport_id, mustChangePassword: user.must_change_password,
+  }), {
     status: 200,
     headers: {
       'Content-Type': 'application/json',
@@ -116,6 +125,26 @@ app.post('/auth/logout', c => {
       'Set-Cookie': clearAuthCookie(),
     },
   });
+});
+
+// PUT /auth/password — change own password
+app.put('/auth/password', async c => {
+  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  if (!user) return err('Unauthorized', 401);
+  const { currentPassword, newPassword } = await c.req.json<{ currentPassword: string; newPassword: string }>();
+  if (!currentPassword || !newPassword) return err('Missing fields');
+  if (newPassword.length < 8) return err('Password must be at least 8 characters');
+  const dbUser = await c.env.DB.prepare(
+    'SELECT password_hash FROM users WHERE id = ?'
+  ).bind(user.sub).first<{ password_hash: string }>();
+  if (!dbUser || !(await verifyPassword(currentPassword, dbUser.password_hash))) {
+    return err('Current password is incorrect', 401);
+  }
+  const newHash = await hashPassword(newPassword);
+  await c.env.DB.prepare(
+    'UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?'
+  ).bind(newHash, user.sub).run();
+  return json({ ok: true });
 });
 
 // GET /auth/me
@@ -211,6 +240,13 @@ app.post('/api/requests', async c => {
       return err(`Invalid Rocket Number: ${athlete.rocketNumber}`);
     }
     if (!athlete.sport) return err('Sport is required');
+
+    const duplicate = await c.env.DB.prepare(
+      'SELECT id FROM insurance_requests WHERE rocket_number = ? AND term = ? AND sport = ?'
+    ).bind(athlete.rocketNumber, body.term, athlete.sport).first();
+    if (duplicate) {
+      return err(`A request already exists for ${athlete.rocketNumber} in ${body.term} for this sport`);
+    }
 
     const id = newUUID();
     const ip = c.req.header('CF-Connecting-IP') ?? c.req.header('X-Forwarded-For') ?? 'unknown';
@@ -324,6 +360,16 @@ app.post('/api/requests/:id/sign', async c => {
 
   if (user.role === 'sport_admin') {
     if (req.status !== 'PENDING_SPORT_ADMIN') return err('Not pending sport admin signature', 409);
+    // Verify this admin is assigned to the request's sport
+    const adminRow = await c.env.DB.prepare(
+      'SELECT id FROM sport_administrators WHERE email = ?'
+    ).bind(user.email).first<{ id: string }>();
+    const sportRow = await c.env.DB.prepare(
+      'SELECT sport_admin_id FROM sports_programs WHERE id = ?'
+    ).bind(req.sport).first<{ sport_admin_id: string | null }>();
+    if (!adminRow || !sportRow || sportRow.sport_admin_id !== adminRow.id) {
+      return err('Not authorized to sign requests for this sport', 403);
+    }
     sigRole = 'SPORT_ADMIN';
     newStatus = 'PENDING_CFO';
   } else if (user.role === 'cfo') {
@@ -505,10 +551,12 @@ app.get('/api/reports/csv', async c => {
 });
 
 function csvEscape(value: string): string {
-  if (value.includes(',') || value.includes('"') || value.includes('\n')) {
-    return `"${value.replace(/"/g, '""')}"`;
+  // Prefix formula-triggering characters to prevent Excel injection
+  const sanitized = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  if (sanitized.includes(',') || sanitized.includes('"') || sanitized.includes('\n')) {
+    return `"${sanitized.replace(/"/g, '""')}"`;
   }
-  return value;
+  return sanitized;
 }
 
 // ── Admin — users ─────────────────────────────────────────────────────────────
@@ -644,7 +692,3 @@ export default {
   },
 };
 
-// Placeholder for Cloudflare Workflows binding (used in wrangler.jsonc)
-export class InsuranceApprovalWorkflow {
-  async run() {}
-}

@@ -12,7 +12,7 @@ const DEADLINES: Record<string, { month: number; day: number }> = {
 export function isBeforeDeadline(term: string): boolean {
   const termKey = term.split(' ')[0]; // e.g. "Fall" from "Fall 2025"
   const deadline = DEADLINES[termKey];
-  if (!deadline) return true; // unknown term, allow
+  if (!deadline) return false; // unknown term, reject
   const now = new Date();
   const year = parseInt(term.split(' ')[1] ?? String(now.getFullYear()), 10);
   const deadlineDate = new Date(year, deadline.month - 1, deadline.day, 23, 59, 59);

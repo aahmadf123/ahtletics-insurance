@@ -6,6 +6,7 @@ export interface User {
   name: string;
   role: UserRole;
   sportId?: string; // for coaches: their assigned sport
+  mustChangePassword?: number;
 }
 
 export type RequestStatus =

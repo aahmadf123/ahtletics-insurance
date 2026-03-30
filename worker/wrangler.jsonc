@@ -14,13 +14,6 @@
       "database_id": "bf574fd6-c5f2-46bf-aed5-532b2f48aa2d"
     }
   ],
-  "workflows": [
-    {
-      "binding": "INSURANCE_WORKFLOW",
-      "name": "insurance-approval-workflow",
-      "class_name": "InsuranceApprovalWorkflow"
-    }
-  ],
   "triggers": {
     "crons": ["0 * * * *"]
   },

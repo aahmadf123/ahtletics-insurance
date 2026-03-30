@@ -1,3 +1,11 @@
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 export interface Env {
   RESEND_API_KEY?: string;
   FROM_EMAIL: string;
@@ -36,12 +44,12 @@ ${actionLink ? `<p><a href="${actionLink}" style="background:#003DA5;color:white
 
 function detailsTable(d: EmailData): string {
   return `<table style="border-collapse:collapse;width:100%;margin:12px 0">
-<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600;width:40%">Student-Athlete</td><td style="padding:6px 12px;border:1px solid #e9ecef">${d.studentName}</td></tr>
-<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Rocket Number</td><td style="padding:6px 12px;border:1px solid #e9ecef">${d.rocketNumber}</td></tr>
-<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Sport</td><td style="padding:6px 12px;border:1px solid #e9ecef">${d.sportName}</td></tr>
-<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Term</td><td style="padding:6px 12px;border:1px solid #e9ecef">${d.term}</td></tr>
-<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Premium Cost</td><td style="padding:6px 12px;border:1px solid #e9ecef"><strong>$${d.premiumCost.toFixed(2)}</strong> — will be deducted from ${d.coachName}'s operating budget</td></tr>
-<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Requesting Coach</td><td style="padding:6px 12px;border:1px solid #e9ecef">${d.coachName} (${d.coachEmail})</td></tr>
+<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600;width:40%">Student-Athlete</td><td style="padding:6px 12px;border:1px solid #e9ecef">${escapeHtml(d.studentName)}</td></tr>
+<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Rocket Number</td><td style="padding:6px 12px;border:1px solid #e9ecef">${escapeHtml(d.rocketNumber)}</td></tr>
+<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Sport</td><td style="padding:6px 12px;border:1px solid #e9ecef">${escapeHtml(d.sportName)}</td></tr>
+<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Term</td><td style="padding:6px 12px;border:1px solid #e9ecef">${escapeHtml(d.term)}</td></tr>
+<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Premium Cost</td><td style="padding:6px 12px;border:1px solid #e9ecef"><strong>$${d.premiumCost.toFixed(2)}</strong> — will be deducted from ${escapeHtml(d.coachName)}'s operating budget</td></tr>
+<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Requesting Coach</td><td style="padding:6px 12px;border:1px solid #e9ecef">${escapeHtml(d.coachName)} (${escapeHtml(d.coachEmail)})</td></tr>
 </table>`;
 }
 
@@ -82,7 +90,7 @@ ${detailsTable(d)}
 export async function notifyPendingCFO(env: Env, d: EmailData): Promise<void> {
   const subject = `Action Required: Final Approval – Health Insurance Request for ${d.studentName}`;
   const body = `<p>A health insurance request has been approved by the Sport Administrator and now requires your final approval.</p>
-${d.sportAdminName ? `<p>Approved by Sport Admin: <strong>${d.sportAdminName}</strong></p>` : ''}
+${d.sportAdminName ? `<p>Approved by Sport Admin: <strong>${escapeHtml(d.sportAdminName)}</strong></p>` : ''}
 ${detailsTable(d)}`;
   await sendEmail(env, env.CFO_EMAIL, subject, emailHtml(subject, body, actionUrl(env, d.requestId), 'Final Approval'));
 }
@@ -102,7 +110,7 @@ ${detailsTable(d)}
 export async function notifyVoided(env: Env, d: EmailData, adminEmail?: string): Promise<void> {
   const subject = `Voided: Health Insurance Request for ${d.studentName}`;
   const body = `<p>This health insurance request has been voided by the CFO.</p>
-${d.voidReason ? `<p><strong>Reason:</strong> ${d.voidReason}</p>` : ''}
+${d.voidReason ? `<p><strong>Reason:</strong> ${escapeHtml(d.voidReason)}</p>` : ''}
 ${detailsTable(d)}
 <p>If you believe this was in error, please contact the Athletics Business Office.</p>`;
   const recipients = [d.coachEmail];
