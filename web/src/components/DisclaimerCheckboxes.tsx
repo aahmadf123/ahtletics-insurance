@@ -1,12 +1,11 @@
 import { useState } from 'react';
 
 interface DisclaimerCheckboxesProps {
-  term: string;
   deadline: string;
   onChange: (allChecked: boolean) => void;
 }
 
-export function DisclaimerCheckboxes({ term, deadline, onChange }: DisclaimerCheckboxesProps) {
+export function DisclaimerCheckboxes({ deadline, onChange }: DisclaimerCheckboxesProps) {
   const [checked, setChecked] = useState([false, false, false]);
 
   const toggle = (i: number) => {
