@@ -9,6 +9,10 @@ import {
 import {
   validateRocketNumber, isBeforeDeadline, getPremiumForTerm, newUUID,
 } from './lib/validation';
+import {
+  createEnvelope, voidEnvelope, verifyWebhookHMAC, parseConnectXml,
+  type DocuSignEnv,
+} from './lib/docusign';
 
 // ── Env bindings ──────────────────────────────────────────────────────────────
 
@@ -21,6 +25,13 @@ export interface Env {
   RESEND_API_KEY?: string;
   DEV_MODE?: string;
   ASSETS: Fetcher;
+  // DocuSign
+  DOCUSIGN_INTEGRATION_KEY: string;
+  DOCUSIGN_USER_ID: string;
+  DOCUSIGN_ACCOUNT_ID: string;
+  DOCUSIGN_PRIVATE_KEY: string;
+  DOCUSIGN_TEMPLATE_ID: string;
+  DOCUSIGN_HMAC_SECRET?: string;
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -374,6 +385,65 @@ app.post('/api/requests', async c => {
       status: initialStatus,
     };
 
+    // ── DocuSign envelope creation ───────────────────────────────────────
+    // Get CFO info for the second signer
+    const cfoRow = await c.env.DB.prepare(
+      'SELECT name, email FROM sport_administrators WHERE is_cfo = 1'
+    ).first<{ name: string; email: string }>();
+
+    const recipients = [];
+    if (!isSoftball && sportRow?.adminEmail && sportRow?.adminName) {
+      recipients.push({
+        email: sportRow.adminEmail,
+        name: sportRow.adminName,
+        roleName: 'Sport Administrator',
+        routingOrder: '1',
+      });
+    }
+    if (cfoRow) {
+      recipients.push({
+        email: cfoRow.email,
+        name: cfoRow.name,
+        roleName: 'CFO',
+        routingOrder: isSoftball ? '1' : '2',
+      });
+    }
+
+    if (recipients.length > 0 && c.env.DOCUSIGN_INTEGRATION_KEY) {
+      try {
+        const dsEnv: DocuSignEnv = c.env;
+        const result = await createEnvelope(dsEnv, {
+          emailSubject: `Insurance Authorization — ${athlete.studentName.trim()} (${sportRow?.sportName ?? athlete.sport})`,
+          templateId: c.env.DOCUSIGN_TEMPLATE_ID,
+          recipients,
+          templateFields: {
+            studentName: athlete.studentName.trim(),
+            rocketNumber: athlete.rocketNumber,
+            sport: sportRow?.sportName ?? athlete.sport,
+            term: body.term,
+            premiumCost: `$${premiumCost.toFixed(2)}`,
+            coachName: user.name,
+            coachEmail: user.email,
+          },
+          webhookUrl: `${c.env.APP_BASE_URL}/api/docusign/webhook`,
+        });
+
+        // Store envelope ID
+        await c.env.DB.prepare(
+          'UPDATE insurance_requests SET workflow_instance_id = ? WHERE id = ?'
+        ).bind(result.envelopeId, id).run();
+
+        await c.env.DB.prepare(`
+          INSERT INTO audit_log (id, request_id, action, performed_by, details)
+          VALUES (?, ?, 'DOCUSIGN_ENVELOPE_CREATED', 'system', ?)
+        `).bind(newUUID(), id, JSON.stringify({ envelopeId: result.envelopeId })).run();
+      } catch (dsErr) {
+        console.error('DocuSign envelope creation failed:', dsErr);
+        // Continue — the in-app workflow still works as fallback
+      }
+    }
+
+    // Email notifications (still sent as a heads-up alongside DocuSign)
     if (isSoftball) {
       await notifyPendingCFO(c.env, emailData);
     } else if (sportRow?.adminEmail) {
@@ -395,6 +465,7 @@ app.get('/api/requests/:id', async c => {
   const req = await c.env.DB.prepare(`
     SELECT ir.id, ir.student_name as studentName, ir.rocket_number as rocketNumber,
            ir.sport, ir.term, ir.premium_cost as premiumCost, ir.status,
+           ir.workflow_instance_id as envelopeId,
            ir.coach_email as coachEmail, ir.coach_name as coachName,
            ir.created_at as createdAt,
            sp.name as sportName,
@@ -526,6 +597,16 @@ app.post('/api/requests/:id/void', async c => {
 
   await c.env.DB.prepare('UPDATE insurance_requests SET status = ? WHERE id = ?')
     .bind('VOIDED', id).run();
+
+  // Void the DocuSign envelope if one exists
+  const envelopeId = req.workflow_instance_id as string | null;
+  if (envelopeId && c.env.DOCUSIGN_INTEGRATION_KEY) {
+    try {
+      await voidEnvelope(c.env as DocuSignEnv, envelopeId, reason.trim());
+    } catch (dsErr) {
+      console.error('DocuSign void failed:', dsErr);
+    }
+  }
 
   await c.env.DB.prepare(`
     INSERT INTO audit_log (id, request_id, action, performed_by, details)
@@ -695,6 +776,139 @@ app.put('/api/admin/sports/:id', async c => {
   const { adminId } = await c.req.json<{ adminId: string | null }>();
   await c.env.DB.prepare('UPDATE sports_programs SET sport_admin_id = ? WHERE id = ?')
     .bind(adminId ?? null, id).run();
+  return json({ ok: true });
+});
+
+// ── DocuSign Connect webhook ─────────────────────────────────────────────────
+
+app.post('/api/docusign/webhook', async c => {
+  const rawBody = await c.req.text();
+
+  // Verify HMAC signature if secret is configured
+  if (c.env.DOCUSIGN_HMAC_SECRET) {
+    const sig = c.req.header('X-DocuSign-Signature-1') ?? '';
+    const valid = await verifyWebhookHMAC(c.env.DOCUSIGN_HMAC_SECRET, rawBody, sig);
+    if (!valid) {
+      console.error('DocuSign webhook HMAC verification failed');
+      return err('Invalid signature', 401);
+    }
+  }
+
+  const event = parseConnectXml(rawBody);
+  if (!event.envelopeId) {
+    return json({ ok: true }); // nothing to do
+  }
+
+  // Find the request linked to this envelope
+  const req = await c.env.DB.prepare(`
+    SELECT ir.id, ir.status, ir.student_name, ir.rocket_number, ir.sport,
+           ir.term, ir.premium_cost, ir.coach_email, ir.coach_name,
+           sp.name as sportName, sa.email as sportAdminEmail, sa.name as sportAdminName
+    FROM insurance_requests ir
+    LEFT JOIN sports_programs sp ON ir.sport = sp.id
+    LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
+    WHERE ir.workflow_instance_id = ?
+  `).bind(event.envelopeId).first<{
+    id: string; status: string; student_name: string; rocket_number: string;
+    sport: string; term: string; premium_cost: number; coach_email: string;
+    coach_name: string; sportName: string; sportAdminEmail: string | null;
+    sportAdminName: string | null;
+  }>();
+
+  if (!req) {
+    console.error(`DocuSign webhook: no request found for envelope ${event.envelopeId}`);
+    return json({ ok: true });
+  }
+
+  // Process completed recipients — record signatures
+  for (const r of event.recipients) {
+    if (r.status !== 'completed') continue;
+
+    // Determine role from roleName
+    let sigRole: string;
+    if (r.roleName === 'Sport Administrator') {
+      sigRole = 'SPORT_ADMIN';
+    } else if (r.roleName === 'CFO') {
+      sigRole = 'CFO';
+    } else {
+      continue; // unknown role
+    }
+
+    // Avoid duplicate signatures
+    const existing = await c.env.DB.prepare(
+      'SELECT id FROM signatures WHERE request_id = ? AND signatory_email = ? AND signatory_role = ?'
+    ).bind(req.id, r.email, sigRole).first();
+    if (existing) continue;
+
+    await c.env.DB.prepare(`
+      INSERT INTO signatures (id, request_id, signatory_role, signatory_email, signatory_name, ip_address)
+      VALUES (?, ?, ?, ?, ?, 'docusign')
+    `).bind(newUUID(), req.id, sigRole, r.email, r.name).run();
+
+    await c.env.DB.prepare(`
+      INSERT INTO audit_log (id, request_id, action, performed_by, details)
+      VALUES (?, ?, 'DOCUSIGN_SIGNED', ?, ?)
+    `).bind(newUUID(), req.id, r.email, JSON.stringify({
+      role: sigRole, envelopeId: event.envelopeId, signedAt: r.signedDateTime,
+    })).run();
+  }
+
+  // Update status based on envelope-level event
+  const emailData = {
+    studentName: req.student_name,
+    rocketNumber: req.rocket_number,
+    sport: req.sport,
+    sportName: req.sportName ?? req.sport,
+    term: req.term,
+    premiumCost: req.premium_cost,
+    coachName: req.coach_name,
+    coachEmail: req.coach_email,
+    requestId: req.id,
+    status: req.status,
+    sportAdminName: req.sportAdminName ?? undefined,
+  };
+
+  if (event.envelopeStatus === 'completed' && req.status !== 'EXECUTED') {
+    await c.env.DB.prepare('UPDATE insurance_requests SET status = ? WHERE id = ?')
+      .bind('EXECUTED', req.id).run();
+
+    await c.env.DB.prepare(`
+      INSERT INTO audit_log (id, request_id, action, performed_by, details)
+      VALUES (?, ?, 'DOCUSIGN_COMPLETED', 'system', ?)
+    `).bind(newUUID(), req.id, JSON.stringify({ envelopeId: event.envelopeId })).run();
+
+    emailData.status = 'EXECUTED';
+    await notifyExecuted(c.env, emailData, req.sportAdminEmail ?? undefined);
+  } else if (event.envelopeStatus === 'declined' || event.envelopeStatus === 'voided') {
+    if (!['VOIDED', 'EXECUTED'].includes(req.status)) {
+      await c.env.DB.prepare('UPDATE insurance_requests SET status = ? WHERE id = ?')
+        .bind('VOIDED', req.id).run();
+
+      await c.env.DB.prepare(`
+        INSERT INTO audit_log (id, request_id, action, performed_by, details)
+        VALUES (?, ?, 'DOCUSIGN_VOIDED', 'system', ?)
+      `).bind(newUUID(), req.id, JSON.stringify({
+        envelopeId: event.envelopeId, reason: event.envelopeStatus,
+      })).run();
+
+      emailData.status = 'VOIDED';
+      emailData.voidReason = `Envelope ${event.envelopeStatus} via DocuSign`;
+      await notifyVoided(c.env, emailData, req.sportAdminEmail ?? undefined);
+    }
+  } else if (event.envelopeStatus === 'sent') {
+    // A recipient completed but envelope isn't done yet → advance status
+    const sportAdminSigned = event.recipients.some(
+      r => r.roleName === 'Sport Administrator' && r.status === 'completed'
+    );
+    if (sportAdminSigned && req.status === 'PENDING_SPORT_ADMIN') {
+      await c.env.DB.prepare('UPDATE insurance_requests SET status = ? WHERE id = ?')
+        .bind('PENDING_CFO', req.id).run();
+
+      emailData.status = 'PENDING_CFO';
+      await notifyPendingCFO(c.env, emailData);
+    }
+  }
+
   return json({ ok: true });
 });
 

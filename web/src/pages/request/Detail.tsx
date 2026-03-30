@@ -120,7 +120,18 @@ export function RequestDetail() {
 
       {error && <p className="error">{error}</p>}
 
-      {canSign && !alreadySigned && (
+      {req.envelopeId && (
+        <div className="form-card">
+          <h2>DocuSign eSignature</h2>
+          <p>This request is being signed via DocuSign. Signers will receive an email from DocuSign to review and sign the authorization document.</p>
+          <dl className="detail-list">
+            <dt>Envelope ID</dt><dd><code>{req.envelopeId}</code></dd>
+            <dt>Status</dt><dd><StatusBadge status={req.status} /></dd>
+          </dl>
+        </div>
+      )}
+
+      {canSign && !alreadySigned && !req.envelopeId && (
         <div className="action-zone">
           <p className="action-note">
             By clicking below, you are applying your digital signature to this request.

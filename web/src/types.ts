@@ -43,6 +43,7 @@ export interface RequestDetail extends InsuranceRequest {
   signatures: Signature[];
   sportAdminName?: string;
   sportAdminEmail?: string;
+  envelopeId?: string;
 }
 
 export interface SportProgram {
