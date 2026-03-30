@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "wrangler dev --local",
+    "predeploy": "(cd ../web && npm install && npm run build)",
     "deploy": "wrangler deploy"
   },
   "dependencies": {
