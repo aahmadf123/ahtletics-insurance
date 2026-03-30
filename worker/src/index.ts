@@ -20,6 +20,7 @@ export interface Env {
   APP_BASE_URL: string;
   RESEND_API_KEY?: string;
   DEV_MODE?: string;
+  ASSETS: Fetcher;
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -564,6 +565,18 @@ app.put('/api/admin/sports/:id', async c => {
   await c.env.DB.prepare('UPDATE sports_programs SET sport_admin_id = ? WHERE id = ?')
     .bind(adminId ?? null, id).run();
   return json({ ok: true });
+});
+
+// ── Static assets / SPA fallback ─────────────────────────────────────────────
+
+app.all('*', async c => {
+  const assetResponse = await c.env.ASSETS.fetch(c.req.raw);
+  if (assetResponse.status === 404) {
+    // SPA fallback: serve index.html for client-side routing
+    const origin = new URL(c.req.url).origin;
+    return c.env.ASSETS.fetch(new Request(`${origin}/index.html`));
+  }
+  return assetResponse;
 });
 
 // ── Scheduled: 48h reminder emails ───────────────────────────────────────────

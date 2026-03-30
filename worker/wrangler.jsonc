@@ -1,8 +1,12 @@
 {
-  "name": "worker",
+  "name": "ahtletics-insurance",
   "main": "src/index.ts",
   "compatibility_date": "2024-09-23",
   "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "../web/dist",
+    "binding": "ASSETS"
+  },
   "d1_databases": [
     {
       "binding": "DB",
@@ -21,9 +25,9 @@
     "crons": ["0 * * * *"]
   },
   "vars": {
-    "CFO_EMAIL": "melissa.deangelo@utoledo.edu",
+    "CFO_EMAIL": "firas.azfar@gmail.com",
     "FROM_EMAIL": "noreply@athletics.utoledo.edu",
-    "APP_BASE_URL": "https://ahtletics-insurance.pages.dev",
+    "APP_BASE_URL": "https://ahtletics-insurance.firas-azfar.workers.dev",
     "DEV_MODE": "false"
   }
 }
