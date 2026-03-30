@@ -1,0 +1,20 @@
+{
+  "name": "worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-09-23",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "athletics_insurance_db",
+      "database_name": "athletics-insurance-db",
+      "database_id": "bf574fd6-c5f2-46bf-aed5-532b2f48aa2d"
+    }
+  ],
+  "workflows": [
+    {
+      "binding": "INSURANCE_WORKFLOW",
+      "name": "insurance-approval-workflow",
+      "class_name": "InsuranceApprovalWorkflow"
+    }
+  ]
+}

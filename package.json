@@ -1,0 +1,11 @@
+{
+  "name": "athletics-insurance",
+  "private": true,
+  "workspaces": [
+    "worker",
+    "web"
+  ],
+  "devDependencies": {
+    "drizzle-kit": "^0.31.10"
+  }
+}
