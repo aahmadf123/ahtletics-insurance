@@ -21,6 +21,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 // Auth
+export function checkAuthStatus() {
+  return request<{ setupRequired: boolean }>('/auth/status');
+}
+
 export function getMe() {
   return request<User>('/auth/me');
 }
@@ -43,10 +47,10 @@ export function changePassword(currentPassword: string, newPassword: string) {
   });
 }
 
-export function setupAccount(email: string, password: string, name: string, role: string) {
+export function setupAccount(email: string, password: string, name: string, role: string, sportId?: string) {
   return request<User>('/auth/setup', {
     method: 'POST',
-    body: JSON.stringify({ email, password, name, role }),
+    body: JSON.stringify({ email, password, name, role, sportId }),
   });
 }
 

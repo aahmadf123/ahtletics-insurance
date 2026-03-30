@@ -56,21 +56,28 @@ const isSecure = (req: Request) =>
 
 // ── Auth routes ───────────────────────────────────────────────────────────────
 
+// GET /auth/status — check if initial setup is needed
+app.get('/auth/status', async c => {
+  const existing = await c.env.DB.prepare('SELECT id FROM users LIMIT 1').first();
+  return json({ setupRequired: !existing });
+});
+
 // POST /auth/setup — first-time admin setup (only if zero users exist)
 app.post('/auth/setup', async c => {
-  const { email, password, name, role } = await c.req.json<{
-    email: string; password: string; name: string; role: string;
+  const { email, password, name, role, sportId } = await c.req.json<{
+    email: string; password: string; name: string; role: string; sportId?: string;
   }>();
   if (!email || !password || !name || !role) return err('Missing fields');
   if (!['coach', 'sport_admin', 'cfo'].includes(role)) return err('Invalid role');
   if (password.length < 8) return err('Password must be at least 8 characters');
+  if (role === 'coach' && !sportId) return err('Coaches must select a sport');
   const existing = await c.env.DB.prepare('SELECT id FROM users LIMIT 1').first();
   if (existing) return err('Setup already complete', 403);
   const id = newUUID();
   const passwordHash = await hashPassword(password);
   await c.env.DB.prepare(
-    'INSERT INTO users (id, email, password_hash, name, role) VALUES (?, ?, ?, ?, ?)'
-  ).bind(id, email.toLowerCase(), passwordHash, name, role).run();
+    'INSERT INTO users (id, email, password_hash, name, role, sport_id) VALUES (?, ?, ?, ?, ?, ?)'
+  ).bind(id, email.toLowerCase(), passwordHash, name, role, sportId ?? null).run();
   const token = await signJWT(
     { sub: id, email: email.toLowerCase(), name, role: role as 'cfo', iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 },
     c.env.JWT_SECRET
@@ -326,6 +333,17 @@ app.get('/api/requests/:id', async c => {
 
   // RBAC check
   if (user.role === 'coach' && req.coach_email !== user.email) return err('Forbidden', 403);
+  if (user.role === 'sport_admin') {
+    const adminRow = await c.env.DB.prepare(
+      'SELECT id FROM sport_administrators WHERE email = ?'
+    ).bind(user.email).first<{ id: string }>();
+    const sportRow = await c.env.DB.prepare(
+      'SELECT sport_admin_id FROM sports_programs WHERE id = ?'
+    ).bind(req.sport).first<{ sport_admin_id: string | null }>();
+    if (!adminRow || !sportRow || sportRow.sport_admin_id !== adminRow.id) {
+      return err('Forbidden', 403);
+    }
+  }
 
   const { results: sigs } = await c.env.DB.prepare(`
     SELECT id, request_id as requestId, signatory_role as signatoryRole,
