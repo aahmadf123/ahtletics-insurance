@@ -36,6 +36,13 @@ export function logout() {
   return request<void>('/auth/logout', { method: 'POST' });
 }
 
+export function changePassword(currentPassword: string, newPassword: string) {
+  return request<{ ok: boolean }>('/auth/password', {
+    method: 'PUT',
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+}
+
 export function setupAccount(email: string, password: string, name: string, role: string) {
   return request<User>('/auth/setup', {
     method: 'POST',
