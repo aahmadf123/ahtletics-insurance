@@ -5,6 +5,10 @@
     "worker",
     "web"
   ],
+  "scripts": {
+    "build": "npm run build -w web",
+    "deploy": "npm run build -w web && npm run deploy -w worker"
+  },
   "devDependencies": {
     "drizzle-kit": "^0.31.10"
   },
