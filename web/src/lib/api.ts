@@ -18,6 +18,19 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 // ─── Auth ──────────────────────────────────────────────────────────────────────
 export const getMe = ()                          => apiFetch<SessionUser>('/auth/me');
 export const logout = ()                         => apiFetch<{ ok: boolean }>('/auth/logout', { method: 'POST' });
+
+export const login = (email: string, password: string) =>
+  apiFetch<{ ok: boolean; role: string }>('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+  });
+
+export const register = (email: string, password: string, displayName: string) =>
+  apiFetch<{ ok: boolean; role: string }>('/auth/register', {
+    method: 'POST',
+    body: JSON.stringify({ email, password, displayName }),
+  });
+
 export const devLogin = (email: string, displayName: string) =>
   apiFetch<{ ok: boolean; role: string }>('/auth/dev-login', {
     method: 'POST',

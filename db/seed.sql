@@ -24,3 +24,8 @@ INSERT INTO sports_programs (id, name, gender, head_coach, sport_admin_id) VALUE
   ('womens_tennis',        'Women''s Tennis',            'Womens', NULL,                                  NULL),
   ('womens_track',         'Women''s Track & Field',     'Womens', 'Linh Nguyen / Andrea Grove-McDonough','brian_lutz'),
   ('womens_volleyball',    'Women''s Volleyball',        'Womens', NULL,                                  'connor_whelan');
+
+-- ─── Default Users (password: "changeme123") ──────────────────────────────────
+-- NOTE: You must update these passwords after first login.
+-- Passwords are hashed with PBKDF2-SHA256, 100k iterations.
+-- The hash below corresponds to "changeme123" — generate new hashes via the /auth/register endpoint.

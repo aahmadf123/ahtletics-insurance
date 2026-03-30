@@ -1,6 +1,16 @@
 import { sqliteTable, text, real, integer } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
 
+// ─── Users ──────────────────────────────────────────────────────────────────
+
+export const users = sqliteTable("users", {
+  id: text("id").primaryKey(),
+  email: text("email").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  displayName: text("display_name").notNull(),
+  createdAt: text("created_at").default(sql`CURRENT_TIMESTAMP`),
+});
+
 // ─── Core Tables ────────────────────────────────────────────────────────────
 
 export const insuranceRequests = sqliteTable("insurance_requests", {
