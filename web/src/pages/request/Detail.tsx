@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { useAuth } from '../../lib/auth';
-import { getRequest, signRequest, voidRequest } from '../../lib/api';
+import { getRequest, signRequest, voidRequest, getDocuSignUrl } from '../../lib/api';
 import { StatusBadge } from '../../components/StatusBadge';
 import type { RequestDetail } from '../../types';
 
@@ -9,9 +9,11 @@ export function RequestDetail() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [req, setReq] = useState<RequestDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [signing, setSigning] = useState(false);
+  const [signingError, setSigningError] = useState('');
   const [voiding, setVoiding] = useState(false);
   const [voidReason, setVoidReason] = useState('');
   const [showVoidForm, setShowVoidForm] = useState(false);
@@ -19,22 +21,31 @@ export function RequestDetail() {
 
   useEffect(() => {
     if (!id) return;
+    setLoading(true);
     getRequest(id)
       .then(setReq)
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
-  }, [id]);
+  }, [id, searchParams.get('signed')]);
 
   const handleSign = async () => {
     if (!id) return;
     setSigning(true);
+    setSigningError('');
     setError('');
     try {
+      if (req?.envelopeId) {
+        // DocuSign embedded signing — redirect to DocuSign
+        const { url } = await getDocuSignUrl(id);
+        window.location.href = url;
+        return; // page will navigate away
+      }
+      // Fallback: in-app signature
       await signRequest(id);
       const updated = await getRequest(id);
       setReq(updated);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Signing failed');
+      setSigningError(err instanceof Error ? err.message : 'Could not open DocuSign');
     } finally {
       setSigning(false);
     }
@@ -131,18 +142,36 @@ export function RequestDetail() {
         </div>
       )}
 
-      {canSign && !alreadySigned && !req.envelopeId && (
+      {canSign && !alreadySigned && (
         <div className="action-zone">
-          <p className="action-note">
-            By clicking below, you are applying your digital signature to this request.
-          </p>
-          <button
-            className="btn btn-primary"
-            onClick={handleSign}
-            disabled={signing}
-          >
-            {signing ? 'Applying Signature…' : 'Apply My Signature'}
-          </button>
+          {req.envelopeId ? (
+            <>
+              <p className="action-note">
+                This request requires your signature via DocuSign. Clicking below will open the DocuSign signing page.
+              </p>
+              {signingError && <p className="error">{signingError}</p>}
+              <button
+                className="btn btn-primary"
+                onClick={handleSign}
+                disabled={signing}
+              >
+                {signing ? 'Opening DocuSign…' : 'Sign via DocuSign'}
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="action-note">
+                By clicking below, you are applying your digital signature to this request.
+              </p>
+              <button
+                className="btn btn-primary"
+                onClick={handleSign}
+                disabled={signing}
+              >
+                {signing ? 'Applying Signature…' : 'Apply My Signature'}
+              </button>
+            </>
+          )}
         </div>
       )}
 

@@ -10,7 +10,7 @@ import {
   validateRocketNumber, isBeforeDeadline, getPremiumForTerm, newUUID,
 } from './lib/validation';
 import {
-  createEnvelope, voidEnvelope, verifyWebhookHMAC, parseConnectXml,
+  createEnvelope, voidEnvelope, getSigningUrl, verifyWebhookHMAC, parseConnectXml,
   type DocuSignEnv,
 } from './lib/docusign';
 
@@ -398,6 +398,7 @@ app.post('/api/requests', async c => {
         name: sportRow.adminName,
         roleName: 'Sport Administrator',
         routingOrder: '1',
+        clientUserId: sportRow.adminEmail,
       });
     }
     if (cfoRow) {
@@ -406,6 +407,7 @@ app.post('/api/requests', async c => {
         name: cfoRow.name,
         roleName: 'CFO',
         routingOrder: isSoftball ? '1' : '2',
+        clientUserId: cfoRow.email,
       });
     }
 
@@ -490,7 +492,55 @@ app.get('/api/requests/:id', async c => {
   return json({ ...req, signatures: sigs });
 });
 
-// POST /api/requests/:id/sign
+// POST /api/requests/:id/signing-url — get a DocuSign embedded signing URL
+app.post('/api/requests/:id/signing-url', async c => {
+  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  if (!user) return err('Unauthorized', 401);
+  if (user.role === 'coach') return err('Coaches do not sign at this stage', 403);
+
+  const { id } = c.req.param();
+
+  const req = await c.env.DB.prepare(`
+    SELECT ir.id, ir.status, ir.sport, ir.workflow_instance_id as envelopeId,
+           sp.name as sportName, sa.email as sportAdminEmail, sa.name as sportAdminName
+    FROM insurance_requests ir
+    LEFT JOIN sports_programs sp ON ir.sport = sp.id
+    LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
+    WHERE ir.id = ?
+  `).bind(id).first<{
+    id: string; status: string; sport: string; envelopeId: string | null;
+    sportName: string; sportAdminEmail: string | null; sportAdminName: string | null;
+  }>();
+
+  if (!req) return err('Not found', 404);
+  if (!req.envelopeId) return err('No DocuSign envelope exists for this request', 409);
+
+  // Validate the user is the expected current signer
+  const canSign =
+    (user.role === 'sport_admin' && req.status === 'PENDING_SPORT_ADMIN') ||
+    (user.role === 'cfo' && (req.status === 'PENDING_CFO' || (req.status === 'PENDING_SPORT_ADMIN' && req.sport === 'womens_softball')));
+
+  if (!canSign) return err('You are not the current signer for this request', 403);
+
+  const returnUrl = `${c.env.APP_BASE_URL}/request/${id}?signed=1`;
+
+  try {
+    const url = await getSigningUrl(
+      c.env as DocuSignEnv,
+      req.envelopeId,
+      user.email,
+      user.name,
+      user.email, // clientUserId must match envelope creation
+      returnUrl,
+    );
+    return json({ url });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return err(`Could not generate signing URL: ${msg}`, 502);
+  }
+});
+
+// POST /api/requests/:id/sign — in-app fallback (only when DocuSign envelope not present)
 app.post('/api/requests/:id/sign', async c => {
   const user = await getUser(c.req.raw, c.env.JWT_SECRET);
   if (!user) return err('Unauthorized', 401);

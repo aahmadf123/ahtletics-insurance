@@ -79,6 +79,10 @@ export function signRequest(id: string) {
   return request<InsuranceRequest>(`/api/requests/${id}/sign`, { method: 'POST' });
 }
 
+export function getDocuSignUrl(id: string) {
+  return request<{ url: string }>(`/api/requests/${id}/signing-url`, { method: 'POST' });
+}
+
 export function voidRequest(id: string, reason: string) {
   return request<InsuranceRequest>(`/api/requests/${id}/void`, {
     method: 'POST',

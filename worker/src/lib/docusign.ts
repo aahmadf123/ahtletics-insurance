@@ -93,6 +93,8 @@ export interface EnvelopeRecipient {
   name: string;
   roleName: string; // must match the template role name
   routingOrder: string;
+  /** clientUserId marks this as an embedded signer — required for getSigningUrl */
+  clientUserId: string;
 }
 
 export interface CreateEnvelopeOptions {
@@ -121,6 +123,7 @@ export async function createEnvelope(
     name: r.name,
     roleName: r.roleName,
     routingOrder: r.routingOrder,
+    clientUserId: r.clientUserId,
     tabs: {
       textTabs: Object.entries(opts.templateFields).map(([tabLabel, value]) => ({
         tabLabel,
@@ -170,6 +173,46 @@ export async function createEnvelope(
 
   const data = (await res.json()) as { envelopeId: string; status: string };
   return { envelopeId: data.envelopeId, status: data.status };
+}
+
+// ── Get embedded signing URL for a recipient ────────────────────────────────
+
+export async function getSigningUrl(
+  env: DocuSignEnv,
+  envelopeId: string,
+  recipientEmail: string,
+  recipientName: string,
+  /** Must match the clientUserId used when creating the envelope */
+  clientUserId: string,
+  returnUrl: string,
+): Promise<string> {
+  const token = await getAccessToken(env);
+
+  const res = await fetch(
+    `${API_BASE}/v2.1/accounts/${env.DOCUSIGN_ACCOUNT_ID}/envelopes/${envelopeId}/views/recipient`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        authenticationMethod: 'none',
+        clientUserId,
+        email: recipientEmail,
+        userName: recipientName,
+        returnUrl,
+      }),
+    },
+  );
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`DocuSign recipient view error: ${res.status} ${text}`);
+  }
+
+  const data = (await res.json()) as { url: string };
+  return data.url;
 }
 
 // ── Void an existing envelope ───────────────────────────────────────────────
