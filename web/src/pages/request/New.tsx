@@ -81,10 +81,8 @@ export function NewRequest() {
         })),
         term,
       });
-      // For a single request with a DocuSign signing URL, redirect directly to DocuSign
-      if (results.length === 1 && results[0].signingUrl) {
-        window.location.href = results[0].signingUrl;
-      } else if (results.length === 1) {
+      // For a single request, navigate to its detail page
+      if (results.length === 1) {
         navigate(`/request/${results[0].id}`);
       } else {
         navigate('/dashboard');
@@ -100,8 +98,8 @@ export function NewRequest() {
     <div className="page">
       <h1>New Insurance Request</h1>
       <p className="page-subtitle">
-        Complete all fields below. You will be redirected to DocuSign to review and sign the
-        authorization document. You may add multiple athletes in a single submission.
+        Complete all fields below. Your signature is recorded automatically on submission.
+        The request will then be routed to the Sport Administrator and CFO for approval.
       </p>
 
       <form className="form-card" onSubmit={handleSubmit}>
@@ -215,7 +213,7 @@ export function NewRequest() {
             ? 'Submitting…'
             : athletes.length > 1
               ? `Submit ${athletes.length} Requests`
-              : 'Submit Request & Sign via DocuSign'}
+              : 'Submit Request'}
         </button>
       </form>
     </div>

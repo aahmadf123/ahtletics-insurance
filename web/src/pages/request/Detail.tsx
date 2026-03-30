@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../../lib/auth';
-import { getRequest, voidRequest, getDocuSignUrl } from '../../lib/api';
+import { getRequest, voidRequest, signRequest, getRequestPdfUrl } from '../../lib/api';
 import { StatusBadge } from '../../components/StatusBadge';
 import type { RequestDetail } from '../../types';
 
@@ -9,34 +9,35 @@ export function RequestDetail() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
   const [req, setReq] = useState<RequestDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [signing, setSigning] = useState(false);
-  const [signingError, setSigningError] = useState('');
   const [voiding, setVoiding] = useState(false);
   const [voidReason, setVoidReason] = useState('');
   const [showVoidForm, setShowVoidForm] = useState(false);
   const [error, setError] = useState('');
 
-  useEffect(() => {
+  const loadRequest = () => {
     if (!id) return;
     setLoading(true);
     getRequest(id)
       .then(setReq)
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
-  }, [id, searchParams.get('signed')]);
+  };
 
-  const handleOpenDocuSign = async () => {
+  useEffect(loadRequest, [id]);
+
+  const handleSign = async () => {
     if (!id) return;
     setSigning(true);
-    setSigningError('');
+    setError('');
     try {
-      const { url } = await getDocuSignUrl(id);
-      window.location.href = url;
+      await signRequest(id);
+      loadRequest(); // refresh to see updated status/signatures
     } catch (err: unknown) {
-      setSigningError(err instanceof Error ? err.message : 'Could not open DocuSign');
+      setError(err instanceof Error ? err.message : 'Signing failed');
+    } finally {
       setSigning(false);
     }
   };
@@ -58,17 +59,13 @@ export function RequestDetail() {
   if (loading) return <div className="page"><p className="muted">Loading…</p></div>;
   if (!req) return <div className="page"><p className="error">{error || 'Request not found.'}</p></div>;
 
-  // Coach can re-open their DocuSign session if they haven't signed yet
-  const coachNeedsDocuSign =
-    user?.role === 'coach' &&
-    req.coachEmail === user?.email &&
-    !!req.envelopeId &&
-    !req.signatures.some(s => s.signatoryEmail === user?.email && s.signatoryRole === 'COACH');
-
-  // Sport Admin / CFO sign entirely through DocuSign email — they see status info only
-  const pendingDocuSignFor =
+  // Determine if current user needs to sign
+  const canSign =
     (user?.role === 'sport_admin' && req.status === 'PENDING_SPORT_ADMIN') ||
-    (user?.role === 'cfo' && (req.status === 'PENDING_CFO' || (req.status === 'PENDING_SPORT_ADMIN' && req.sport === 'womens_softball')));
+    (user?.role === 'cfo' && req.status === 'PENDING_CFO');
+
+  // Check if PDF is available (at least coach has signed)
+  const hasSomeSignatures = req.signatures.length > 0;
 
   return (
     <div className="page">
@@ -127,41 +124,35 @@ export function RequestDetail() {
 
       {error && <p className="error">{error}</p>}
 
-      {req.envelopeId && (
+      {hasSomeSignatures && (
         <div className="form-card">
-          <h2>DocuSign eSignature</h2>
-          <p>This request is being signed via DocuSign. Signers will receive an email from DocuSign to review and sign the authorization document.</p>
-          <dl className="detail-list">
-            <dt>Envelope ID</dt><dd><code>{req.envelopeId}</code></dd>
-            <dt>Status</dt><dd><StatusBadge status={req.status} /></dd>
-          </dl>
+          <h2>Authorization Document</h2>
+          <p>Download the Insurance Authorization Form with all recorded signatures.</p>
+          <a
+            className="btn btn-primary"
+            href={getRequestPdfUrl(req.id)}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ display: 'inline-block', textDecoration: 'none' }}
+          >
+            Download PDF
+          </a>
         </div>
       )}
 
-      {coachNeedsDocuSign && (
+      {canSign && (
         <div className="action-zone">
           <p className="action-note">
-            Your DocuSign signature is still required. Click below to open the DocuSign signing page
-            where you can review and sign the authorization document.
+            This request is awaiting your signature. By clicking below you confirm you have read
+            the acknowledgments and authorize this insurance request.
           </p>
-          {signingError && <p className="error">{signingError}</p>}
           <button
             className="btn btn-primary"
-            onClick={handleOpenDocuSign}
+            onClick={handleSign}
             disabled={signing}
           >
-            {signing ? 'Opening DocuSign…' : 'Open DocuSign to Review & Sign'}
+            {signing ? 'Signing…' : 'Approve & Sign'}
           </button>
-        </div>
-      )}
-
-      {pendingDocuSignFor && (
-        <div className="action-zone">
-          <p className="action-note">
-            This request is awaiting your signature via DocuSign. You should have received an email
-            from DocuSign — please check your inbox (and spam folder) to review, preview, and sign
-            the authorization document directly in DocuSign.
-          </p>
         </div>
       )}
 

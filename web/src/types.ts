@@ -28,8 +28,6 @@ export interface InsuranceRequest {
   coachEmail: string;
   coachName: string;
   createdAt: string;
-  /** DocuSign embedded signing URL for the coach — present immediately after submission */
-  signingUrl?: string;
 }
 
 export interface Signature {
@@ -45,7 +43,6 @@ export interface RequestDetail extends InsuranceRequest {
   signatures: Signature[];
   sportAdminName?: string;
   sportAdminEmail?: string;
-  envelopeId?: string;
 }
 
 export interface SportProgram {

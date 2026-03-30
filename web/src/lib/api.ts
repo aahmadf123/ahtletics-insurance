@@ -75,8 +75,12 @@ export function submitRequest(payload: BulkSubmitPayload) {
   });
 }
 
-export function getDocuSignUrl(id: string) {
-  return request<{ url: string }>(`/api/requests/${id}/signing-url`, { method: 'POST' });
+export function signRequest(id: string) {
+  return request<{ id: string; status: string }>(`/api/requests/${id}/sign`, { method: 'POST' });
+}
+
+export function getRequestPdfUrl(id: string) {
+  return `/api/requests/${id}/pdf`;
 }
 
 export function voidRequest(id: string, reason: string) {
