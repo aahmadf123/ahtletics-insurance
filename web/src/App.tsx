@@ -10,20 +10,6 @@ import { NewRequest } from './pages/request/New';
 import { RequestDetail } from './pages/request/Detail';
 import { Reports } from './pages/Reports';
 import { AdminUsers } from './pages/admin/Users';
-import { ChangePassword } from './pages/ChangePassword';
-
-function RequireAuth({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    getMe().then(setUser).catch(() => setUser(null)).finally(() => setLoading(false));
-  }, []);
-
-  if (loading) return <div className="loading-screen"><p>Loading…</p></div>;
-  if (!user) return <Navigate to="/login" replace />;
-  return <>{children}</>;
-}
 
 function Nav({ user, onLogout }: { user: User; onLogout: () => void }) {
   return (
@@ -79,40 +65,27 @@ function AppLayout() {
 
   return (
     <AuthContext.Provider value={{ user, loading, selectIdentity, logout, refresh }}>
-      {user && !user.mustChangePassword && <Nav user={user} onLogout={logout} />}
+      {user && <Nav user={user} onLogout={logout} />}
       <main className="main-content">
         <Routes>
-          <Route path="/login" element={user ? <Navigate to={user.mustChangePassword ? '/change-password' : '/dashboard'} replace /> : <Login />} />
-          <Route path="/change-password" element={
-            user ? <ChangePassword /> : <Navigate to="/login" replace />
-          } />
+          <Route path="/login" element={user ? <Navigate to="/dashboard" replace /> : <Login />} />
           <Route path="/dashboard" element={
-            !user ? <Navigate to="/login" replace /> :
-            user.mustChangePassword ? <Navigate to="/change-password" replace /> :
-            <Dashboard />
+            !user ? <Navigate to="/login" replace /> : <Dashboard />
           } />
           <Route path="/request/new" element={
-            !user ? <Navigate to="/login" replace /> :
-            user.mustChangePassword ? <Navigate to="/change-password" replace /> :
-            <NewRequest />
+            !user ? <Navigate to="/login" replace /> : <NewRequest />
           } />
           <Route path="/request/:id" element={
-            !user ? <Navigate to="/login" replace /> :
-            user.mustChangePassword ? <Navigate to="/change-password" replace /> :
-            <RequestDetail />
+            !user ? <Navigate to="/login" replace /> : <RequestDetail />
           } />
           <Route path="/reports" element={
-            !user ? <Navigate to="/login" replace /> :
-            user.mustChangePassword ? <Navigate to="/change-password" replace /> :
-            <Reports />
+            !user ? <Navigate to="/login" replace /> : <Reports />
           } />
           <Route path="/admin/users" element={
-            !user ? <Navigate to="/login" replace /> :
-            user.mustChangePassword ? <Navigate to="/change-password" replace /> :
-            <AdminUsers />
+            !user ? <Navigate to="/login" replace /> : <AdminUsers />
           } />
-          <Route path="/" element={<Navigate to={user ? (user.mustChangePassword ? '/change-password' : '/dashboard') : '/login'} replace />} />
-          <Route path="*" element={<Navigate to={user ? (user.mustChangePassword ? '/change-password' : '/dashboard') : '/login'} replace />} />
+          <Route path="/" element={<Navigate to={user ? '/dashboard' : '/login'} replace />} />
+          <Route path="*" element={<Navigate to={user ? '/dashboard' : '/login'} replace />} />
         </Routes>
       </main>
     </AuthContext.Provider>

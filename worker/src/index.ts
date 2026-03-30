@@ -261,7 +261,11 @@ app.get('/api/requests', async c => {
   const { sport, term, status, coach } = c.req.query();
 
   let query = `
-    SELECT ir.*, sp.name as sportName,
+    SELECT ir.id, ir.student_name as studentName, ir.rocket_number as rocketNumber,
+           ir.sport, ir.term, ir.premium_cost as premiumCost, ir.status,
+           ir.coach_email as coachEmail, ir.coach_name as coachName,
+           ir.created_at as createdAt,
+           sp.name as sportName,
            sa.name as sportAdminName, sa.email as sportAdminEmail
     FROM insurance_requests ir
     LEFT JOIN sports_programs sp ON ir.sport = sp.id
@@ -272,16 +276,8 @@ app.get('/api/requests', async c => {
 
   if (user.role === 'coach') {
     query += ' AND ir.coach_email = ?'; params.push(user.email);
-  } else if (user.role === 'sport_admin') {
-    // sport admin sees requests for their sports
-    const adminRow = await c.env.DB.prepare(
-      'SELECT id FROM sport_administrators WHERE email = ?'
-    ).bind(user.email).first<{ id: string }>();
-    if (adminRow) {
-      query += ' AND sp.sport_admin_id = ?'; params.push(adminRow.id);
-    }
   }
-  // CFO sees all
+  // sport_admin and CFO see all requests
 
   if (sport) { query += ' AND ir.sport = ?'; params.push(sport); }
   if (term) { query += ' AND ir.term LIKE ?'; params.push(`%${term}%`); }
@@ -397,7 +393,11 @@ app.get('/api/requests/:id', async c => {
   const { id } = c.req.param();
 
   const req = await c.env.DB.prepare(`
-    SELECT ir.*, sp.name as sportName,
+    SELECT ir.id, ir.student_name as studentName, ir.rocket_number as rocketNumber,
+           ir.sport, ir.term, ir.premium_cost as premiumCost, ir.status,
+           ir.coach_email as coachEmail, ir.coach_name as coachName,
+           ir.created_at as createdAt,
+           sp.name as sportName,
            sa.name as sportAdminName, sa.email as sportAdminEmail
     FROM insurance_requests ir
     LEFT JOIN sports_programs sp ON ir.sport = sp.id
@@ -408,18 +408,7 @@ app.get('/api/requests/:id', async c => {
   if (!req) return err('Not found', 404);
 
   // RBAC check
-  if (user.role === 'coach' && req.coach_email !== user.email) return err('Forbidden', 403);
-  if (user.role === 'sport_admin') {
-    const adminRow = await c.env.DB.prepare(
-      'SELECT id FROM sport_administrators WHERE email = ?'
-    ).bind(user.email).first<{ id: string }>();
-    const sportRow = await c.env.DB.prepare(
-      'SELECT sport_admin_id FROM sports_programs WHERE id = ?'
-    ).bind(req.sport).first<{ sport_admin_id: string | null }>();
-    if (!adminRow || !sportRow || sportRow.sport_admin_id !== adminRow.id) {
-      return err('Forbidden', 403);
-    }
-  }
+  if (user.role === 'coach' && req.coachEmail !== user.email) return err('Forbidden', 403);
 
   const { results: sigs } = await c.env.DB.prepare(`
     SELECT id, request_id as requestId, signatory_role as signatoryRole,

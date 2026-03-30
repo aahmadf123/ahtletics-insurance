@@ -22,8 +22,8 @@ const DEADLINES: Record<string, string> = {
   Summer: `July 1, ${CURRENT_YEAR + 1}`,
 };
 
-function emptyAthlete(): AthleteEntry {
-  return { studentName: '', rocketNumber: '', sport: '' };
+function emptyAthlete(sportId?: string): AthleteEntry {
+  return { studentName: '', rocketNumber: '', sport: sportId ?? '' };
 }
 
 function validateRocket(val: string): string {
@@ -37,10 +37,12 @@ export function NewRequest() {
 
   const [sports, setSports] = useState<SportProgram[]>([]);
   const [term, setTerm] = useState('');
-  const [athletes, setAthletes] = useState<AthleteEntry[]>([emptyAthlete()]);
+  const [athletes, setAthletes] = useState<AthleteEntry[]>([emptyAthlete(user?.sportId)]);
   const [disclaimerOk, setDisclaimerOk] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+
+  const coachSportId = user?.sportId;
 
   useEffect(() => {
     listSports().then(setSports).catch(console.error);
@@ -63,7 +65,7 @@ export function NewRequest() {
     }));
   };
 
-  const addAthlete = () => setAthletes(prev => [...prev, emptyAthlete()]);
+  const addAthlete = () => setAthletes(prev => [...prev, emptyAthlete(coachSportId)]);
 
   const removeAthlete = (index: number) => {
     if (athletes.length === 1) return;
@@ -71,7 +73,7 @@ export function NewRequest() {
   };
 
   const athletesValid = athletes.every(
-    a => a.studentName.trim() && /^R\d{8}$/.test(a.rocketNumber) && a.sport && !a.rocketError
+    a => a.studentName.trim() && /^R\d{8}$/.test(a.rocketNumber) && (coachSportId || a.sport) && !a.rocketError
   );
   const canSubmit = term && athletesValid && disclaimerOk;
 
@@ -85,7 +87,7 @@ export function NewRequest() {
         athletes: athletes.map(a => ({
           studentName: a.studentName.trim(),
           rocketNumber: a.rocketNumber,
-          sport: a.sport,
+          sport: coachSportId || a.sport,
         })),
         term,
       });
@@ -178,16 +180,28 @@ export function NewRequest() {
 
                 <div className="field">
                   <label>Sport *</label>
-                  <select
-                    value={athlete.sport}
-                    onChange={e => updateAthlete(index, 'sport', e.target.value)}
-                    required
-                  >
-                    <option value="">Select a sport…</option>
-                    {sports.map(s => (
-                      <option key={s.id} value={s.id}>{s.name}</option>
-                    ))}
-                  </select>
+                  {coachSportId ? (
+                    <>
+                      <input
+                        type="text"
+                        value={sports.find(s => s.id === coachSportId)?.name ?? coachSportId}
+                        disabled
+                        className="field-disabled"
+                      />
+                      <input type="hidden" value={coachSportId} />
+                    </>
+                  ) : (
+                    <select
+                      value={athlete.sport}
+                      onChange={e => updateAthlete(index, 'sport', e.target.value)}
+                      required
+                    >
+                      <option value="">Select a sport…</option>
+                      {sports.map(s => (
+                        <option key={s.id} value={s.id}>{s.name}</option>
+                      ))}
+                    </select>
+                  )}
                 </div>
               </div>
             </div>

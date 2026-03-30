@@ -494,6 +494,7 @@ h2 { font-size: 1.1rem; color: var(--gray-800); margin-bottom: 1rem; }
   box-shadow: 0 0 0 3px rgba(0,61,165,.1);
 }
 .field-error { display: block; color: var(--red); font-size: .8rem; margin-top: .25rem; }
+.field-disabled input { background: var(--gray-100); color: var(--gray-600); cursor: not-allowed; }
 
 /* ── Buttons ──────────────────────────────────────────────────── */
 .btn {
