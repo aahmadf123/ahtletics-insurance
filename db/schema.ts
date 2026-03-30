@@ -1,6 +1,19 @@
 import { sqliteTable, text, real, integer } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
 
+// ─── Users (email+password auth, no SAML) ────────────────────────────────────
+
+export const users = sqliteTable("users", {
+  id: text("id").primaryKey(),
+  email: text("email").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  name: text("name").notNull(),
+  role: text("role").notNull(), // coach | sport_admin | cfo
+  sportId: text("sport_id"), // for coaches: their primary sport
+  mustChangePassword: integer("must_change_password").notNull().default(0),
+  createdAt: text("created_at").default(sql`CURRENT_TIMESTAMP`),
+});
+
 // ─── Core Tables ────────────────────────────────────────────────────────────
 
 export const insuranceRequests = sqliteTable("insurance_requests", {

@@ -5,7 +5,7 @@ import { listSports, submitRequest } from '../../lib/api';
 import { DisclaimerCheckboxes } from '../../components/DisclaimerCheckboxes';
 import { PremiumDisplay } from '../../components/PremiumDisplay';
 import { TERM_OPTIONS } from '../../types';
-import type { SportProgram } from '../../types';
+import type { SportProgram, AthleteEntry } from '../../types';
 
 const CURRENT_YEAR = new Date().getFullYear();
 
@@ -13,6 +13,7 @@ const TERMS = TERM_OPTIONS.map(t => ({
   value: `${t.label} ${t.label === 'Fall' ? CURRENT_YEAR : CURRENT_YEAR + 1}`,
   label: `${t.label} ${t.label === 'Fall' ? CURRENT_YEAR : CURRENT_YEAR + 1}`,
   premium: t.premium,
+  termKey: t.label,
 }));
 
 const DEADLINES: Record<string, string> = {
@@ -21,19 +22,25 @@ const DEADLINES: Record<string, string> = {
   Summer: `July 1, ${CURRENT_YEAR + 1}`,
 };
 
+function emptyAthlete(): AthleteEntry {
+  return { studentName: '', rocketNumber: '', sport: '' };
+}
+
+function validateRocket(val: string): string {
+  if (val && !/^R\d{8}$/.test(val)) return 'Must be R followed by 8 digits (e.g. R12345678)';
+  return '';
+}
+
 export function NewRequest() {
   const { user } = useAuth();
-  const navigate  = useNavigate();
+  const navigate = useNavigate();
 
-  const [sports, setSports]           = useState<SportProgram[]>([]);
-  const [studentName, setStudentName] = useState('');
-  const [rocketNumber, setRocketNumber] = useState('');
-  const [sport, setSport]             = useState('');
-  const [term, setTerm]               = useState('');
+  const [sports, setSports] = useState<SportProgram[]>([]);
+  const [term, setTerm] = useState('');
+  const [athletes, setAthletes] = useState<AthleteEntry[]>([emptyAthlete()]);
   const [disclaimerOk, setDisclaimerOk] = useState(false);
-  const [submitting, setSubmitting]   = useState(false);
-  const [error, setError]             = useState('');
-  const [rocketError, setRocketError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     listSports().then(setSports).catch(console.error);
@@ -44,20 +51,29 @@ export function NewRequest() {
   }
 
   const selectedTerm = TERMS.find(t => t.value === term);
-  const termKey = term.split(' ')[0];
+  const termKey = term.split(' ')[0] as string;
   const deadline = DEADLINES[termKey] ?? '';
 
-  const validateRocket = (val: string) => {
-    if (val && !/^R\d{8}$/.test(val)) {
-      setRocketError('Must be R followed by 8 digits (e.g. R12345678)');
-    } else {
-      setRocketError('');
-    }
-    setRocketNumber(val);
+  const updateAthlete = (index: number, field: keyof AthleteEntry, value: string) => {
+    setAthletes(prev => prev.map((a, i) => {
+      if (i !== index) return a;
+      const updated = { ...a, [field]: field === 'rocketNumber' ? value.toUpperCase() : value };
+      if (field === 'rocketNumber') updated.rocketError = validateRocket(updated.rocketNumber);
+      return updated;
+    }));
   };
 
-  const canSubmit = studentName.trim() && !rocketError && /^R\d{8}$/.test(rocketNumber)
-    && sport && term && disclaimerOk;
+  const addAthlete = () => setAthletes(prev => [...prev, emptyAthlete()]);
+
+  const removeAthlete = (index: number) => {
+    if (athletes.length === 1) return;
+    setAthletes(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const athletesValid = athletes.every(
+    a => a.studentName.trim() && /^R\d{8}$/.test(a.rocketNumber) && a.sport && !a.rocketError
+  );
+  const canSubmit = term && athletesValid && disclaimerOk;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -65,8 +81,20 @@ export function NewRequest() {
     setSubmitting(true);
     setError('');
     try {
-      const res = await submitRequest({ studentName: studentName.trim(), rocketNumber, sport, term });
-      navigate(`/request/${res.id}`);
+      const results = await submitRequest({
+        athletes: athletes.map(a => ({
+          studentName: a.studentName.trim(),
+          rocketNumber: a.rocketNumber,
+          sport: a.sport,
+        })),
+        term,
+      });
+      // Navigate to first request detail if single, else dashboard
+      if (results.length === 1) {
+        navigate(`/request/${results[0].id}`);
+      } else {
+        navigate('/dashboard');
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Submission failed');
     } finally {
@@ -77,49 +105,17 @@ export function NewRequest() {
   return (
     <div className="page">
       <h1>New Insurance Request</h1>
-      <p className="page-subtitle">Complete all fields and check all three disclaimers before submitting.</p>
+      <p className="page-subtitle">
+        Complete all fields and check all three disclaimers before submitting.
+        You may add multiple athletes in a single submission.
+      </p>
 
       <form className="form-card" onSubmit={handleSubmit}>
+        {/* Term selection — shared across all athletes */}
         <fieldset className="fieldset">
-          <legend>Student-Athlete Information</legend>
-
+          <legend>Academic Term</legend>
           <div className="field">
-            <label>Student-Athlete Full Name *</label>
-            <input
-              type="text"
-              value={studentName}
-              onChange={e => setStudentName(e.target.value)}
-              placeholder="First Last"
-              required
-              maxLength={200}
-            />
-          </div>
-
-          <div className="field">
-            <label>Rocket Number *</label>
-            <input
-              type="text"
-              value={rocketNumber}
-              onChange={e => validateRocket(e.target.value.toUpperCase())}
-              placeholder="R12345678"
-              required
-              maxLength={9}
-            />
-            {rocketError && <span className="field-error">{rocketError}</span>}
-          </div>
-
-          <div className="field">
-            <label>Sport *</label>
-            <select value={sport} onChange={e => setSport(e.target.value)} required>
-              <option value="">Select a sport…</option>
-              {sports.map(s => (
-                <option key={s.id} value={s.id}>{s.name}</option>
-              ))}
-            </select>
-          </div>
-
-          <div className="field">
-            <label>Academic Term *</label>
+            <label>Term *</label>
             <select value={term} onChange={e => setTerm(e.target.value)} required>
               <option value="">Select a term…</option>
               {TERMS.map(t => (
@@ -127,19 +123,86 @@ export function NewRequest() {
               ))}
             </select>
           </div>
-
           {selectedTerm && (
             <PremiumDisplay term={term} premium={selectedTerm.premium} />
           )}
         </fieldset>
 
+        {/* Athlete rows */}
+        <fieldset className="fieldset">
+          <legend>Student-Athletes ({athletes.length})</legend>
+
+          {athletes.map((athlete, index) => (
+            <div key={index} className="athlete-row">
+              <div className="athlete-row-header">
+                <span className="athlete-index">Athlete #{index + 1}</span>
+                {athletes.length > 1 && (
+                  <button
+                    type="button"
+                    className="btn-remove"
+                    onClick={() => removeAthlete(index)}
+                    aria-label="Remove athlete"
+                  >
+                    ✕ Remove
+                  </button>
+                )}
+              </div>
+
+              <div className="athlete-row-fields">
+                <div className="field">
+                  <label>Full Name *</label>
+                  <input
+                    type="text"
+                    value={athlete.studentName}
+                    onChange={e => updateAthlete(index, 'studentName', e.target.value)}
+                    placeholder="First Last"
+                    required
+                    maxLength={200}
+                  />
+                </div>
+
+                <div className="field">
+                  <label>Rocket Number *</label>
+                  <input
+                    type="text"
+                    value={athlete.rocketNumber}
+                    onChange={e => updateAthlete(index, 'rocketNumber', e.target.value)}
+                    placeholder="R12345678"
+                    required
+                    maxLength={9}
+                  />
+                  {athlete.rocketError && (
+                    <span className="field-error">{athlete.rocketError}</span>
+                  )}
+                </div>
+
+                <div className="field">
+                  <label>Sport *</label>
+                  <select
+                    value={athlete.sport}
+                    onChange={e => updateAthlete(index, 'sport', e.target.value)}
+                    required
+                  >
+                    <option value="">Select a sport…</option>
+                    {sports.map(s => (
+                      <option key={s.id} value={s.id}>{s.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+          ))}
+
+          <button type="button" className="btn btn-secondary btn-add-athlete" onClick={addAthlete}>
+            + Add Another Athlete
+          </button>
+        </fieldset>
+
+        {/* Disclaimers */}
         {term && (
           <fieldset className="fieldset">
             <legend>Required Acknowledgments</legend>
-            <DisclaimerCheckboxes
-              deadline={deadline}
-              onChange={setDisclaimerOk}
-            />
+            <DisclaimerCheckboxes deadline={deadline} onChange={setDisclaimerOk} />
           </fieldset>
         )}
 
@@ -150,7 +213,11 @@ export function NewRequest() {
           className="btn btn-primary btn-full"
           disabled={!canSubmit || submitting}
         >
-          {submitting ? 'Submitting…' : 'Submit Request & Apply My Signature'}
+          {submitting
+            ? 'Submitting…'
+            : athletes.length > 1
+              ? `Submit ${athletes.length} Requests & Apply My Signature`
+              : 'Submit Request & Apply My Signature'}
         </button>
       </form>
     </div>
