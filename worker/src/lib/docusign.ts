@@ -93,8 +93,8 @@ export interface EnvelopeRecipient {
   name: string;
   roleName: string; // must match the template role name
   routingOrder: string;
-  /** clientUserId marks this as an embedded signer — required for getSigningUrl */
-  clientUserId: string;
+  /** clientUserId marks this as an embedded signer. Omit for remote (email) signers. */
+  clientUserId?: string;
 }
 
 export interface CreateEnvelopeOptions {
@@ -123,7 +123,7 @@ export async function createEnvelope(
     name: r.name,
     roleName: r.roleName,
     routingOrder: r.routingOrder,
-    clientUserId: r.clientUserId,
+    ...(r.clientUserId ? { clientUserId: r.clientUserId } : {}),
     tabs: {
       textTabs: Object.entries(opts.templateFields).map(([tabLabel, value]) => ({
         tabLabel,

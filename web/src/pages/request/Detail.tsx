@@ -72,6 +72,13 @@ export function RequestDetail() {
     (user?.role === 'sport_admin' && req.status === 'PENDING_SPORT_ADMIN') ||
     (user?.role === 'cfo' && (req.status === 'PENDING_CFO' || (req.status === 'PENDING_SPORT_ADMIN' && req.sport === 'womens_softball')));
 
+  // Coach can re-open their DocuSign session from the detail page (recovery scenario)
+  const coachNeedsDocuSign =
+    user?.role === 'coach' &&
+    req.coachEmail === user?.email &&
+    !!req.envelopeId &&
+    ['PENDING_SPORT_ADMIN', 'PENDING_CFO'].includes(req.status);
+
   const alreadySigned = req.signatures.some(s => s.signatoryEmail === user?.email);
 
   return (
@@ -142,27 +149,38 @@ export function RequestDetail() {
         </div>
       )}
 
+      {coachNeedsDocuSign && (
+        <div className="action-zone">
+          <p className="action-note">
+            Your DocuSign signature is still required. Click below to open the DocuSign signing page.
+          </p>
+          {signingError && <p className="error">{signingError}</p>}
+          <button
+            className="btn btn-primary"
+            onClick={handleSign}
+            disabled={signing}
+          >
+            {signing ? 'Opening DocuSign…' : 'Complete My DocuSign Signature'}
+          </button>
+        </div>
+      )}
+
       {canSign && !alreadySigned && (
         <div className="action-zone">
           {req.envelopeId ? (
-            <>
-              <p className="action-note">
-                This request requires your signature via DocuSign. Clicking below will open the DocuSign signing page.
-              </p>
-              {signingError && <p className="error">{signingError}</p>}
-              <button
-                className="btn btn-primary"
-                onClick={handleSign}
-                disabled={signing}
-              >
-                {signing ? 'Opening DocuSign…' : 'Sign via DocuSign'}
-              </button>
-            </>
+            // Remote signing: DocuSign emails them directly — no app action needed
+            <p className="action-note">
+              A DocuSign signature request has been sent to your email address. Please check your
+              inbox (and spam folder) for an email from DocuSign and click the link to review and
+              sign the document.
+            </p>
           ) : (
+            // In-app fallback when no DocuSign envelope exists
             <>
               <p className="action-note">
                 By clicking below, you are applying your digital signature to this request.
               </p>
+              {signingError && <p className="error">{signingError}</p>}
               <button
                 className="btn btn-primary"
                 onClick={handleSign}

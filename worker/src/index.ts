@@ -391,14 +391,23 @@ app.post('/api/requests', async c => {
       'SELECT name, email FROM sport_administrators WHERE is_cfo = 1'
     ).first<{ name: string; email: string }>();
 
+    // Coach is always first signer (embedded — redirected immediately after submission).
+    // Sport Admin and CFO are remote signers: DocuSign emails them directly, no app action needed.
     const recipients = [];
+    recipients.push({
+      email: user.email,
+      name: user.name,
+      roleName: 'Coach',
+      routingOrder: '1',
+      clientUserId: user.email, // embedded — generates signing URL
+    });
     if (!isSoftball && sportRow?.adminEmail && sportRow?.adminName) {
       recipients.push({
         email: sportRow.adminEmail,
         name: sportRow.adminName,
         roleName: 'Sport Administrator',
-        routingOrder: '1',
-        clientUserId: sportRow.adminEmail,
+        routingOrder: '2',
+        // no clientUserId → remote signer, DocuSign emails them directly
       });
     }
     if (cfoRow) {
@@ -406,12 +415,13 @@ app.post('/api/requests', async c => {
         email: cfoRow.email,
         name: cfoRow.name,
         roleName: 'CFO',
-        routingOrder: isSoftball ? '1' : '2',
-        clientUserId: cfoRow.email,
+        routingOrder: isSoftball ? '2' : '3',
+        // no clientUserId → remote signer, DocuSign emails them directly
       });
     }
 
-    if (recipients.length > 0 && c.env.DOCUSIGN_INTEGRATION_KEY) {
+    let coachSigningUrl: string | null = null;
+    if (c.env.DOCUSIGN_INTEGRATION_KEY) {
       try {
         const dsEnv: DocuSignEnv = c.env;
         const result = await createEnvelope(dsEnv, {
@@ -439,6 +449,21 @@ app.post('/api/requests', async c => {
           INSERT INTO audit_log (id, request_id, action, performed_by, details)
           VALUES (?, ?, 'DOCUSIGN_ENVELOPE_CREATED', 'system', ?)
         `).bind(newUUID(), id, JSON.stringify({ envelopeId: result.envelopeId })).run();
+
+        // Generate the coach's embedded signing URL so the frontend can redirect immediately
+        try {
+          const returnUrl = `${c.env.APP_BASE_URL}/request/${id}?signed=1`;
+          coachSigningUrl = await getSigningUrl(
+            dsEnv,
+            result.envelopeId,
+            user.email,
+            user.name,
+            user.email,
+            returnUrl,
+          );
+        } catch (urlErr) {
+          console.error('Failed to get coach signing URL:', urlErr);
+        }
       } catch (dsErr) {
         console.error('DocuSign envelope creation failed:', dsErr);
         // Continue — the in-app workflow still works as fallback
@@ -452,7 +477,7 @@ app.post('/api/requests', async c => {
       await notifyPendingSportAdmin(c.env, emailData, sportRow.adminEmail);
     }
 
-    created.push({ id, studentName: athlete.studentName.trim(), rocketNumber: athlete.rocketNumber, sport: athlete.sport, term: body.term, premiumCost, status: initialStatus, coachEmail: user.email, coachName: user.name });
+    created.push({ id, studentName: athlete.studentName.trim(), rocketNumber: athlete.rocketNumber, sport: athlete.sport, term: body.term, premiumCost, status: initialStatus, coachEmail: user.email, coachName: user.name, signingUrl: coachSigningUrl });
   }
 
   return json(created, 201);
@@ -496,31 +521,23 @@ app.get('/api/requests/:id', async c => {
 app.post('/api/requests/:id/signing-url', async c => {
   const user = await getUser(c.req.raw, c.env.JWT_SECRET);
   if (!user) return err('Unauthorized', 401);
-  if (user.role === 'coach') return err('Coaches do not sign at this stage', 403);
+  // Only coaches use embedded signing; sport admins and CFO sign via DocuSign email
+  if (user.role !== 'coach') return err('Sport admins and CFO sign via DocuSign email', 403);
 
   const { id } = c.req.param();
 
   const req = await c.env.DB.prepare(`
     SELECT ir.id, ir.status, ir.sport, ir.workflow_instance_id as envelopeId,
-           sp.name as sportName, sa.email as sportAdminEmail, sa.name as sportAdminName
+           ir.coach_email as coachEmail
     FROM insurance_requests ir
-    LEFT JOIN sports_programs sp ON ir.sport = sp.id
-    LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
     WHERE ir.id = ?
   `).bind(id).first<{
-    id: string; status: string; sport: string; envelopeId: string | null;
-    sportName: string; sportAdminEmail: string | null; sportAdminName: string | null;
+    id: string; status: string; sport: string; envelopeId: string | null; coachEmail: string;
   }>();
 
   if (!req) return err('Not found', 404);
   if (!req.envelopeId) return err('No DocuSign envelope exists for this request', 409);
-
-  // Validate the user is the expected current signer
-  const canSign =
-    (user.role === 'sport_admin' && req.status === 'PENDING_SPORT_ADMIN') ||
-    (user.role === 'cfo' && (req.status === 'PENDING_CFO' || (req.status === 'PENDING_SPORT_ADMIN' && req.sport === 'womens_softball')));
-
-  if (!canSign) return err('You are not the current signer for this request', 403);
+  if (req.coachEmail !== user.email) return err('Forbidden', 403);
 
   const returnUrl = `${c.env.APP_BASE_URL}/request/${id}?signed=1`;
 
@@ -876,7 +893,9 @@ app.post('/api/docusign/webhook', async c => {
 
     // Determine role from roleName
     let sigRole: string;
-    if (r.roleName === 'Sport Administrator') {
+    if (r.roleName === 'Coach') {
+      sigRole = 'COACH';
+    } else if (r.roleName === 'Sport Administrator') {
       sigRole = 'SPORT_ADMIN';
     } else if (r.roleName === 'CFO') {
       sigRole = 'CFO';
@@ -942,8 +961,7 @@ app.post('/api/docusign/webhook', async c => {
       })).run();
 
       emailData.status = 'VOIDED';
-      emailData.voidReason = `Envelope ${event.envelopeStatus} via DocuSign`;
-      await notifyVoided(c.env, emailData, req.sportAdminEmail ?? undefined);
+      await notifyVoided(c.env, { ...emailData, voidReason: `Envelope ${event.envelopeStatus} via DocuSign` }, req.sportAdminEmail ?? undefined);
     }
   } else if (event.envelopeStatus === 'sent') {
     // A recipient completed but envelope isn't done yet → advance status

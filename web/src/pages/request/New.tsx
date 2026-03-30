@@ -91,8 +91,10 @@ export function NewRequest() {
         })),
         term,
       });
-      // Navigate to first request detail if single, else dashboard
-      if (results.length === 1) {
+      // For a single request with a DocuSign signing URL, redirect directly to DocuSign
+      if (results.length === 1 && results[0].signingUrl) {
+        window.location.href = results[0].signingUrl;
+      } else if (results.length === 1) {
         navigate(`/request/${results[0].id}`);
       } else {
         navigate('/dashboard');
@@ -108,8 +110,8 @@ export function NewRequest() {
     <div className="page">
       <h1>New Insurance Request</h1>
       <p className="page-subtitle">
-        Complete all fields and check all three disclaimers before submitting.
-        You may add multiple athletes in a single submission.
+        Complete all fields and check all three disclaimers. You will be redirected to DocuSign to
+        apply your signature. You may add multiple athletes in a single submission.
       </p>
 
       <form className="form-card" onSubmit={handleSubmit}>
@@ -230,8 +232,8 @@ export function NewRequest() {
           {submitting
             ? 'Submitting…'
             : athletes.length > 1
-              ? `Submit ${athletes.length} Requests & Apply My Signature`
-              : 'Submit Request & Apply My Signature'}
+              ? `Submit ${athletes.length} Requests`
+              : 'Submit Request & Sign via DocuSign'}
         </button>
       </form>
     </div>
