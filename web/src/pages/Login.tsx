@@ -1,227 +1,201 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
-import { checkAuthStatus, listSports, setupAccount } from '../lib/api';
-import type { SportProgram } from '../types';
+import { getIdentities } from '../lib/api';
+import type { IdentityData } from '../lib/api';
 
 export function Login() {
-  const { login } = useAuth();
+  const { selectIdentity } = useAuth();
   const navigate = useNavigate();
 
-  const [mode, setMode] = useState<'login' | 'setup' | 'checking'>('checking');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [name, setName] = useState('');
-  const [role, setRole] = useState('cfo');
+  const [identities, setIdentities] = useState<IdentityData | null>(null);
+  const [role, setRole] = useState<string | null>(null);
   const [sportId, setSportId] = useState('');
-  const [sports, setSports] = useState<SportProgram[]>([]);
+  const [adminId, setAdminId] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [pageLoading, setPageLoading] = useState(true);
 
   useEffect(() => {
-    Promise.all([
-      checkAuthStatus().catch(() => ({ setupRequired: false })),
-      listSports().catch(() => [] as SportProgram[]),
-    ]).then(([status, sportsList]) => {
-      setMode(status.setupRequired ? 'setup' : 'login');
-      setSports(sportsList);
-    });
+    getIdentities()
+      .then(setIdentities)
+      .catch(err => setError(err.message))
+      .finally(() => setPageLoading(false));
   }, []);
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-    setLoading(true);
-    try {
-      await login(email.trim(), password);
-      navigate('/dashboard');
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Login failed');
-    } finally {
-      setLoading(false);
+  const getSelectedInfo = () => {
+    if (!identities) return null;
+    if (role === 'coach' && sportId) {
+      const c = identities.coaches.find(x => x.sportId === sportId);
+      return c ? { name: c.coachName, detail: `${c.sportName} (${c.gender})` } : null;
     }
+    if (role === 'sport_admin' && adminId) {
+      const a = identities.admins.find(x => x.id === adminId);
+      return a ? { name: a.name, detail: a.title } : null;
+    }
+    if (role === 'cfo' && identities.cfo) {
+      return { name: identities.cfo.name, detail: identities.cfo.title };
+    }
+    return null;
   };
 
-  const handleSetup = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const canContinue = role && (
+    (role === 'coach' && sportId) ||
+    (role === 'sport_admin' && adminId) ||
+    role === 'cfo'
+  );
+
+  const handleContinue = async () => {
+    if (!canContinue) return;
     setError('');
     setLoading(true);
     try {
-      await setupAccount(
-        email.trim(),
-        password,
-        name.trim(),
-        role,
+      await selectIdentity(
+        role!,
         role === 'coach' ? sportId : undefined,
+        role === 'sport_admin' ? adminId : undefined,
       );
-      await login(email.trim(), password);
       navigate('/dashboard');
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Setup failed');
+      setError(err instanceof Error ? err.message : 'Failed to enter portal');
     } finally {
       setLoading(false);
     }
   };
 
-  const switchMode = (newMode: 'login' | 'setup') => {
-    setMode(newMode);
-    setError('');
-  };
-
-  if (mode === 'checking') {
-    return (
-      <div className="auth-page">
-        <div className="auth-card">
-          <div className="auth-loading">Loading…</div>
-        </div>
-      </div>
-    );
-  }
+  const selected = getSelectedInfo();
 
   return (
     <div className="auth-page">
-      <div className="auth-card">
-        <div className="auth-brand">
+      {/* Left branding panel */}
+      <div className="auth-panel-left">
+        <div className="auth-left-content">
           <div className="auth-logo-badge">UT</div>
-          <h1 className="auth-title">Athletics Insurance Portal</h1>
-          <p className="auth-subtitle">University of Toledo — Student-Athlete Health Insurance</p>
-        </div>
-
-        {mode === 'setup' && (
-          <div className="auth-notice">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" style={{flexShrink:0,marginTop:2}}>
-              <path d="M8 1a7 7 0 100 14A7 7 0 008 1zm-.75 3.75a.75.75 0 011.5 0v4a.75.75 0 01-1.5 0v-4zm.75 7a.75.75 0 110-1.5.75.75 0 010 1.5z"/>
-            </svg>
-            <span>No accounts exist yet. Create your first administrator account to get started.</span>
+          <h1 className="auth-left-title">Athletics Insurance Portal</h1>
+          <p className="auth-left-subtitle">
+            University of Toledo<br />
+            Student-Athlete Health Insurance Request System
+          </p>
+          <div className="auth-left-divider" />
+          <div className="auth-features">
+            <div className="auth-feature">
+              <span className="auth-feature-dot" />
+              <span>Submit insurance requests for student-athletes</span>
+            </div>
+            <div className="auth-feature">
+              <span className="auth-feature-dot" />
+              <span>Multi-level digital signature workflow</span>
+            </div>
+            <div className="auth-feature">
+              <span className="auth-feature-dot" />
+              <span>Real-time status tracking &amp; notifications</span>
+            </div>
+            <div className="auth-feature">
+              <span className="auth-feature-dot" />
+              <span>Financial reports &amp; CSV export</span>
+            </div>
           </div>
-        )}
+        </div>
+        <div className="auth-left-footer">
+          University of Toledo Athletics
+        </div>
+      </div>
 
-        {mode === 'login' ? (
-          <form onSubmit={handleLogin} className="auth-form">
-            <div className="auth-field">
-              <label htmlFor="email">Email Address</label>
-              <input
-                id="email"
-                type="email"
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                placeholder="you@utoledo.edu"
-                required
-                autoFocus
-              />
-            </div>
-            <div className="auth-field">
-              <label htmlFor="password">Password</label>
-              <input
-                id="password"
-                type="password"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                placeholder="Enter your password"
-                required
-              />
-            </div>
-            {error && <div className="auth-error">{error}</div>}
-            <button type="submit" className="auth-submit" disabled={loading}>
-              {loading ? (
-                <span className="auth-spinner" />
-              ) : null}
-              {loading ? 'Signing in…' : 'Sign In'}
-            </button>
-          </form>
+      {/* Right interactive panel */}
+      <div className="auth-panel-right">
+        {pageLoading ? (
+          <div className="auth-right-content">
+            <div className="auth-loading">Loading portal…</div>
+          </div>
         ) : (
-          <form onSubmit={handleSetup} className="auth-form">
-            <div className="auth-field">
-              <label htmlFor="setup-name">Full Name</label>
-              <input
-                id="setup-name"
-                type="text"
-                value={name}
-                onChange={e => setName(e.target.value)}
-                placeholder="e.g. Jane Smith"
-                required
-                autoFocus
-              />
-            </div>
-            <div className="auth-field">
-              <label htmlFor="setup-email">Email Address</label>
-              <input
-                id="setup-email"
-                type="email"
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                placeholder="you@utoledo.edu"
-                required
-              />
-            </div>
-            <div className="auth-field">
-              <label htmlFor="setup-password">Password</label>
-              <input
-                id="setup-password"
-                type="password"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                placeholder="Min. 8 characters"
-                required
-                minLength={8}
-              />
-            </div>
-            <div className="auth-field">
-              <label htmlFor="setup-role">Your Role</label>
-              <div className="auth-role-grid">
-                {[
-                  { value: 'cfo', label: 'CFO / Admin', desc: 'Full access, manage users & reports' },
-                  { value: 'sport_admin', label: 'Sport Admin', desc: 'Approve requests for your sports' },
-                  { value: 'coach', label: 'Coach', desc: 'Submit insurance requests' },
-                ].map(r => (
-                  <button
-                    key={r.value}
-                    type="button"
-                    className={`auth-role-option ${role === r.value ? 'auth-role-option--active' : ''}`}
-                    onClick={() => { setRole(r.value); if (r.value !== 'coach') setSportId(''); }}
-                  >
+          <div className="auth-right-content">
+            <h2 className="auth-welcome">Welcome</h2>
+            <p className="auth-instruction">Select your role to get started</p>
+
+            <div className="auth-role-cards">
+              {[
+                { value: 'coach', label: 'Coach', desc: 'Submit insurance requests for your athletes' },
+                { value: 'sport_admin', label: 'Sport Administrator', desc: 'Review and approve requests for your sports' },
+                { value: 'cfo', label: 'CFO', desc: 'Final approval, reports & user management' },
+              ].map(r => (
+                <button
+                  key={r.value}
+                  type="button"
+                  className={`auth-role-card ${role === r.value ? 'auth-role-card--active' : ''}`}
+                  onClick={() => {
+                    setRole(r.value);
+                    setSportId('');
+                    setAdminId('');
+                    setError('');
+                  }}
+                >
+                  <div className="auth-role-card-radio">
+                    {role === r.value && <div className="auth-role-card-radio-dot" />}
+                  </div>
+                  <div className="auth-role-card-text">
                     <strong>{r.label}</strong>
                     <span>{r.desc}</span>
-                  </button>
-                ))}
-              </div>
+                  </div>
+                </button>
+              ))}
             </div>
+
             {role === 'coach' && (
-              <div className="auth-field">
-                <label htmlFor="setup-sport">Sport Program</label>
+              <div className="auth-selector" style={{ animationDelay: '0s' }}>
+                <label htmlFor="sport-select">Select your sport</label>
                 <select
-                  id="setup-sport"
+                  id="sport-select"
                   value={sportId}
                   onChange={e => setSportId(e.target.value)}
-                  required
                 >
-                  <option value="">Select your sport…</option>
-                  {sports.map(s => (
-                    <option key={s.id} value={s.id}>{s.name} ({s.gender})</option>
+                  <option value="">Choose a sport…</option>
+                  {identities?.coaches.map(c => (
+                    <option key={c.sportId} value={c.sportId}>
+                      {c.sportName} ({c.gender}) — {c.coachName}
+                    </option>
                   ))}
                 </select>
               </div>
             )}
-            {error && <div className="auth-error">{error}</div>}
-            <button type="submit" className="auth-submit" disabled={loading}>
-              {loading ? (
-                <span className="auth-spinner" />
-              ) : null}
-              {loading ? 'Creating account…' : 'Create Account & Sign In'}
-            </button>
-          </form>
-        )}
 
-        <div className="auth-footer">
-          {mode === 'login' ? (
-            <p>First time? <button type="button" className="auth-link" onClick={() => switchMode('setup')}>Set up your account</button></p>
-          ) : (
-            <p>Already have an account? <button type="button" className="auth-link" onClick={() => switchMode('login')}>Sign in</button></p>
-          )}
-        </div>
-      </div>
-      <div className="auth-attribution">
-        University of Toledo Athletics
+            {role === 'sport_admin' && (
+              <div className="auth-selector" style={{ animationDelay: '0s' }}>
+                <label htmlFor="admin-select">Select your profile</label>
+                <select
+                  id="admin-select"
+                  value={adminId}
+                  onChange={e => setAdminId(e.target.value)}
+                >
+                  <option value="">Choose your name…</option>
+                  {identities?.admins.map(a => (
+                    <option key={a.id} value={a.id}>
+                      {a.name} — {a.title}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {selected && (
+              <div className="auth-identity-confirm">
+                <div className="auth-identity-label">You'll enter as</div>
+                <div className="auth-identity-name">{selected.name}</div>
+                <div className="auth-identity-detail">{selected.detail}</div>
+              </div>
+            )}
+
+            {error && <div className="auth-error">{error}</div>}
+
+            <button
+              className={`auth-submit ${canContinue ? '' : 'auth-submit--disabled'}`}
+              onClick={handleContinue}
+              disabled={!canContinue || loading}
+            >
+              {loading ? <span className="auth-spinner" /> : null}
+              {loading ? 'Entering portal…' : 'Continue to Portal'}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, Link, useNavigate } from 'react-router-dom';
 import { AuthContext } from './lib/auth';
-import { getMe, login as apiLogin, logout as apiLogout } from './lib/api';
+import { getMe, selectIdentity as apiSelectIdentity, logout as apiLogout } from './lib/api';
 import type { User } from './types';
 
 import { Login } from './pages/Login';
@@ -64,8 +64,8 @@ function AppLayout() {
     refresh().finally(() => setLoading(false));
   }, [refresh]);
 
-  const login = async (email: string, password: string) => {
-    const u = await apiLogin(email, password);
+  const selectIdentity = async (role: string, sportId?: string, adminId?: string) => {
+    const u = await apiSelectIdentity(role, sportId, adminId);
     setUser(u);
   };
 
@@ -78,7 +78,7 @@ function AppLayout() {
   if (loading) return <div className="loading-screen"><p>Loading…</p></div>;
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, refresh }}>
+    <AuthContext.Provider value={{ user, loading, selectIdentity, logout, refresh }}>
       {user && !user.mustChangePassword && <Nav user={user} onLogout={logout} />}
       <main className="main-content">
         <Routes>

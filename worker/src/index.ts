@@ -161,6 +161,82 @@ app.get('/auth/me', async c => {
   return json({ id: user.sub, email: user.email, name: user.name, role: user.role, sportId: user.sportId });
 });
 
+// GET /auth/identities — list coaches, sport admins, and CFO for identity selection
+app.get('/auth/identities', async c => {
+  const { results: coaches } = await c.env.DB.prepare(`
+    SELECT id as sportId, name as sportName, gender, head_coach as coachName
+    FROM sports_programs WHERE head_coach IS NOT NULL ORDER BY name
+  `).all();
+  const { results: admins } = await c.env.DB.prepare(`
+    SELECT id, name, title FROM sport_administrators WHERE is_cfo = 0 ORDER BY name
+  `).all();
+  const cfo = await c.env.DB.prepare(`
+    SELECT id, name, title FROM sport_administrators WHERE is_cfo = 1
+  `).first();
+  return json({ coaches, admins, cfo });
+});
+
+// POST /auth/select — select identity (no password required)
+app.post('/auth/select', async c => {
+  const { role, sportId, adminId } = await c.req.json<{
+    role: string; sportId?: string; adminId?: string;
+  }>();
+
+  if (!role || !['coach', 'sport_admin', 'cfo'].includes(role)) return err('Invalid role');
+
+  let email: string;
+  let name: string;
+  let resolvedSportId: string | undefined;
+
+  if (role === 'coach') {
+    if (!sportId) return err('Sport is required for coaches');
+    const sport = await c.env.DB.prepare(
+      'SELECT id, name, head_coach FROM sports_programs WHERE id = ?'
+    ).bind(sportId).first<{ id: string; name: string; head_coach: string | null }>();
+    if (!sport || !sport.head_coach) return err('Sport not found or no coach assigned');
+    email = `${sportId}@coaches.utoledo.edu`;
+    name = sport.head_coach;
+    resolvedSportId = sportId;
+  } else if (role === 'sport_admin') {
+    if (!adminId) return err('Administrator selection is required');
+    const admin = await c.env.DB.prepare(
+      'SELECT id, name, email FROM sport_administrators WHERE id = ? AND is_cfo = 0'
+    ).bind(adminId).first<{ id: string; name: string; email: string }>();
+    if (!admin) return err('Administrator not found');
+    email = admin.email;
+    name = admin.name;
+  } else {
+    const cfo = await c.env.DB.prepare(
+      'SELECT id, name, email FROM sport_administrators WHERE is_cfo = 1'
+    ).first<{ id: string; name: string; email: string }>();
+    if (!cfo) return err('CFO not configured');
+    email = cfo.email;
+    name = cfo.name;
+  }
+
+  const sub = `${role}_${email}`;
+  const payload = {
+    sub,
+    email,
+    name,
+    role: role as 'coach' | 'sport_admin' | 'cfo',
+    sportId: resolvedSportId,
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7,
+  };
+
+  const token = await signJWT(payload, c.env.JWT_SECRET);
+  return new Response(JSON.stringify({
+    id: sub, email, name, role, sportId: resolvedSportId,
+  }), {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json',
+      'Set-Cookie': setAuthCookie(token, isSecure(c.req.raw)),
+    },
+  });
+});
+
 // ── Sports ────────────────────────────────────────────────────────────────────
 
 app.get('/api/sports', async c => {

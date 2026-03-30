@@ -4,7 +4,7 @@ import type { User } from '../types';
 export interface AuthContextValue {
   user: User | null;
   loading: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  selectIdentity: (role: string, sportId?: string, adminId?: string) => Promise<void>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
 }
@@ -12,7 +12,7 @@ export interface AuthContextValue {
 export const AuthContext = createContext<AuthContextValue>({
   user: null,
   loading: true,
-  login: async () => {},
+  selectIdentity: async () => {},
   logout: async () => {},
   refresh: async () => {},
 });

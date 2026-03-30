@@ -21,18 +21,24 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 // Auth
-export function checkAuthStatus() {
-  return request<{ setupRequired: boolean }>('/auth/status');
-}
-
 export function getMe() {
   return request<User>('/auth/me');
 }
 
-export function login(email: string, password: string) {
-  return request<User>('/auth/login', {
+export interface IdentityData {
+  coaches: { sportId: string; sportName: string; gender: string; coachName: string }[];
+  admins: { id: string; name: string; title: string }[];
+  cfo: { id: string; name: string; title: string } | null;
+}
+
+export function getIdentities() {
+  return request<IdentityData>('/auth/identities');
+}
+
+export function selectIdentity(role: string, sportId?: string, adminId?: string) {
+  return request<User>('/auth/select', {
     method: 'POST',
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ role, sportId, adminId }),
   });
 }
 
@@ -44,13 +50,6 @@ export function changePassword(currentPassword: string, newPassword: string) {
   return request<{ ok: boolean }>('/auth/password', {
     method: 'PUT',
     body: JSON.stringify({ currentPassword, newPassword }),
-  });
-}
-
-export function setupAccount(email: string, password: string, name: string, role: string, sportId?: string) {
-  return request<User>('/auth/setup', {
-    method: 'POST',
-    body: JSON.stringify({ email, password, name, role, sportId }),
   });
 }
 
