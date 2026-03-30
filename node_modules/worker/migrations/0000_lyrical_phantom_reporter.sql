@@ -17,6 +17,8 @@ CREATE TABLE `insurance_requests` (
 	`premium_cost` real NOT NULL,
 	`status` text DEFAULT 'PENDING_SPORT_ADMIN' NOT NULL,
 	`workflow_instance_id` text,
+	`coach_email` text NOT NULL,
+	`coach_name` text NOT NULL,
 	`created_at` text DEFAULT CURRENT_TIMESTAMP
 );
 --> statement-breakpoint

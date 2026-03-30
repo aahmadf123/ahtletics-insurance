@@ -5,7 +5,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "d1_databases": [
     {
-      "binding": "athletics_insurance_db",
+      "binding": "DB",
       "database_name": "athletics-insurance-db",
       "database_id": "bf574fd6-c5f2-46bf-aed5-532b2f48aa2d"
     }
@@ -16,5 +16,17 @@
       "name": "insurance-approval-workflow",
       "class_name": "InsuranceApprovalWorkflow"
     }
-  ]
+  ],
+  "triggers": {
+    "crons": ["0 * * * *"] // Every hour — used for 48h reminder emails
+  },
+  "vars": {
+    "CFO_EMAIL": "melissa.deangelo@utoledo.edu",
+    "FROM_EMAIL": "noreply@athletics.utoledo.edu",
+    "APP_BASE_URL": "https://ahtletics-insurance.pages.dev",
+    "SAML_IDP_SSO_URL": "",
+    "SAML_ENTITY_ID": "https://ahtletics-insurance.pages.dev",
+    "SAML_ACS_URL": "https://worker.ahtletics-insurance.workers.dev/auth/callback",
+    "DEV_MODE": "false"
+  }
 }

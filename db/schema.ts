@@ -12,6 +12,8 @@ export const insuranceRequests = sqliteTable("insurance_requests", {
   premiumCost: real("premium_cost").notNull(),
   status: text("status").notNull().default("PENDING_SPORT_ADMIN"),
   workflowInstanceId: text("workflow_instance_id"),
+  coachEmail: text("coach_email").notNull(),
+  coachName: text("coach_name").notNull(),
   createdAt: text("created_at").default(sql`CURRENT_TIMESTAMP`),
 });
 
