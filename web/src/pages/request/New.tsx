@@ -137,7 +137,6 @@ export function NewRequest() {
           <fieldset className="fieldset">
             <legend>Required Acknowledgments</legend>
             <DisclaimerCheckboxes
-              term={term}
               deadline={deadline}
               onChange={setDisclaimerOk}
             />

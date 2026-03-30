@@ -28,6 +28,6 @@
     "SAML_IDP_SSO_URL": "",
     "SAML_ENTITY_ID": "https://ahtletics-insurance.pages.dev",
     "SAML_ACS_URL": "https://worker.ahtletics-insurance.workers.dev/auth/callback",
-    "DEV_MODE": "false"
+    "DEV_MODE": "true"
   }
 }
