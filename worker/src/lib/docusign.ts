@@ -64,7 +64,7 @@ async function getAccessToken(env: DocuSignEnv): Promise<string> {
       aud: 'account-d.docusign.com',
       iat: now,
       exp: now + 3600,
-      scope: 'signature',
+      scope: 'signature impersonation',
     }),
   );
   const assertion = `${header}.${body}`;
