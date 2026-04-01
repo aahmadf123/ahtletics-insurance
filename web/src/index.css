@@ -118,18 +118,9 @@ h2 { font-size: 1.1rem; color: var(--gray-800); margin-bottom: 1rem; }
 }
 
 .auth-logo-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 60px;
-  height: 60px;
-  background: rgba(255, 255, 255, 0.1);
-  border: 2px solid rgba(255, 199, 44, 0.5);
-  color: var(--gold);
-  border-radius: 16px;
-  font-weight: 800;
-  font-size: 1.5rem;
-  letter-spacing: 1px;
+  display: block;
+  height: 72px;
+  width: auto;
   margin-bottom: 1.75rem;
 }
 

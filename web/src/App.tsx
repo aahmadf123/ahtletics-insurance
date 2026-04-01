@@ -16,7 +16,9 @@ function Nav({ user, onLogout }: { user: User; onLogout: () => void }) {
   return (
     <nav className="navbar">
       <div className="navbar-brand">
-        <Link to="/dashboard">Athletics Insurance</Link>
+        <Link to="/dashboard">
+          <img src="/logo-dark.png" alt="University of Toledo Athletics" style={{ height: '36px', verticalAlign: 'middle' }} />
+        </Link>
       </div>
       <div className="navbar-links">
         <Link to="/dashboard">Dashboard</Link>

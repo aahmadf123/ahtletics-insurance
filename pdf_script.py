@@ -32,7 +32,7 @@ from reportlab.lib.enums import TA_LEFT, TA_RIGHT
 
 # Path to the official UT logo (light-background version with transparent BG
 # OR the original PNG – black pixels will be stripped automatically).
-LOGO_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Primary_Logo_for_Light_Background.png")
+LOGO_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "branding", "Primary_Logo_for_Light_Background.png")
 
 # Where to write the finished PDF
 OUTPUT_PDF = "toledo_insurance_auth_v3.pdf"

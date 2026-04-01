@@ -41,7 +41,7 @@ export function Login() {
       {/* Left branding panel */}
       <div className="auth-panel-left">
         <div className="auth-left-content">
-          <div className="auth-logo-badge">UT</div>
+          <img src="/logo-dark.png" alt="University of Toledo Athletics" className="auth-logo-badge" />
           <h1 className="auth-left-title">Athletics Insurance Portal</h1>
           <p className="auth-left-subtitle">
             University of Toledo<br />
