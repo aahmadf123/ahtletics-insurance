@@ -69,7 +69,7 @@ app.post('/auth/setup', async c => {
     email: string; password: string; name: string; role: string; sportId?: string;
   }>();
   if (!email || !password || !name || !role) return err('Missing fields');
-  if (!['coach', 'sport_admin', 'cfo'].includes(role)) return err('Invalid role');
+  if (!['coach', 'sport_admin', 'cfo', 'super_admin'].includes(role)) return err('Invalid role');
   if (password.length < 8) return err('Password must be at least 8 characters');
   if (role === 'coach' && !sportId) return err('Coaches must select a sport');
   const existing = await c.env.DB.prepare('SELECT id FROM users LIMIT 1').first();
@@ -80,7 +80,7 @@ app.post('/auth/setup', async c => {
     'INSERT INTO users (id, email, password_hash, name, role, sport_id) VALUES (?, ?, ?, ?, ?, ?)'
   ).bind(id, email.toLowerCase(), passwordHash, name, role, sportId ?? null).run();
   const token = await signJWT(
-    { sub: id, email: email.toLowerCase(), name, role: role as 'cfo', iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 },
+    { sub: id, email: email.toLowerCase(), name, role: role as 'coach' | 'sport_admin' | 'cfo' | 'super_admin', iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 },
     c.env.JWT_SECRET
   );
   return new Response(JSON.stringify({ id, email: email.toLowerCase(), name, role }), {
@@ -97,16 +97,24 @@ app.post('/auth/login', async c => {
   const { email, password } = await c.req.json<{ email: string; password: string }>();
   if (!email || !password) return err('Email and password required');
   const user = await c.env.DB.prepare(
-    'SELECT id, email, password_hash, name, role, sport_id, must_change_password FROM users WHERE email = ?'
-  ).bind(email.toLowerCase()).first<{ id: string; email: string; password_hash: string; name: string; role: string; sport_id: string | null; must_change_password: number }>();
+    'SELECT id, email, password_hash, name, role, sport_id, must_change_password, status FROM users WHERE email = ?'
+  ).bind(email.toLowerCase()).first<{ id: string; email: string; password_hash: string; name: string; role: string; sport_id: string | null; must_change_password: number; status: string | null }>();
   if (!user || !(await verifyPassword(password, user.password_hash))) {
     return err('Invalid email or password', 401);
+  }
+  // Check account status
+  const userStatus = user.status ?? 'active';
+  if (userStatus === 'pending') {
+    return err('Your account is pending approval. A Super Admin will review it shortly.', 403);
+  }
+  if (userStatus === 'rejected') {
+    return err('Your account request has been rejected.', 403);
   }
   const payload = {
     sub: user.id,
     email: user.email,
     name: user.name,
-    role: user.role as 'coach' | 'sport_admin' | 'cfo',
+    role: user.role as 'coach' | 'sport_admin' | 'cfo' | 'super_admin',
     sportId: user.sport_id ?? undefined,
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7,
@@ -179,56 +187,30 @@ app.get('/auth/identities', async c => {
 
 // POST /auth/select — select identity (no password required)
 app.post('/auth/select', async c => {
-  const { role, sportId, adminId } = await c.req.json<{
-    role: string; sportId?: string; adminId?: string;
+  const { role } = await c.req.json<{
+    role: string;
   }>();
 
-  if (!role || !['coach', 'sport_admin', 'cfo'].includes(role)) return err('Invalid role');
+  // Only coach uses the select flow now (anonymous, instant access)
+  if (role !== 'coach') return err('Only coach role uses identity selection');
 
-  let email: string;
-  let name: string;
-  let resolvedSportId: string | undefined;
+  const email = 'anonymous@coaches.utoledo.edu';
+  const name = 'Coach';
 
-  if (role === 'coach') {
-    if (!sportId) return err('Sport is required for coaches');
-    const sport = await c.env.DB.prepare(
-      'SELECT id, name, head_coach FROM sports_programs WHERE id = ?'
-    ).bind(sportId).first<{ id: string; name: string; head_coach: string | null }>();
-    if (!sport || !sport.head_coach) return err('Sport not found or no coach assigned');
-    email = `${sportId}@coaches.utoledo.edu`;
-    name = sport.head_coach;
-    resolvedSportId = sportId;
-  } else if (role === 'sport_admin') {
-    if (!adminId) return err('Administrator selection is required');
-    const admin = await c.env.DB.prepare(
-      'SELECT id, name, email FROM sport_administrators WHERE id = ? AND is_cfo = 0'
-    ).bind(adminId).first<{ id: string; name: string; email: string }>();
-    if (!admin) return err('Administrator not found');
-    email = admin.email;
-    name = admin.name;
-  } else {
-    const cfo = await c.env.DB.prepare(
-      'SELECT id, name, email FROM sport_administrators WHERE is_cfo = 1'
-    ).first<{ id: string; name: string; email: string }>();
-    if (!cfo) return err('CFO not configured');
-    email = cfo.email;
-    name = cfo.name;
-  }
-
-  const sub = `${role}_${email}`;
+  const sub = `coach_anonymous_${Date.now()}`;
   const payload = {
     sub,
     email,
     name,
-    role: role as 'coach' | 'sport_admin' | 'cfo',
-    sportId: resolvedSportId,
+    role: 'coach' as const,
+    sportId: undefined,
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7,
   };
 
   const token = await signJWT(payload, c.env.JWT_SECRET);
   return new Response(JSON.stringify({
-    id: sub, email, name, role, sportId: resolvedSportId,
+    id: sub, email, name, role: 'coach', sportId: undefined,
   }), {
     status: 200,
     headers: {
@@ -236,6 +218,29 @@ app.post('/auth/select', async c => {
       'Set-Cookie': setAuthCookie(token, isSecure(c.req.raw)),
     },
   });
+});
+
+// POST /auth/register — self-service registration for Sport Admin and CFO
+app.post('/auth/register', async c => {
+  const { email, password, name, role } = await c.req.json<{
+    email: string; password: string; name: string; role: string;
+  }>();
+
+  if (!email || !password || !name || !role) return err('Missing required fields');
+  if (!['sport_admin', 'cfo'].includes(role)) return err('Only Sport Admin and CFO roles can self-register');
+  if (password.length < 8) return err('Password must be at least 8 characters');
+
+  const exists = await c.env.DB.prepare('SELECT id FROM users WHERE email = ?')
+    .bind(email.toLowerCase()).first();
+  if (exists) return err('Email already in use', 409);
+
+  const id = newUUID();
+  const passwordHash = await hashPassword(password);
+  await c.env.DB.prepare(
+    'INSERT INTO users (id, email, password_hash, name, role, status) VALUES (?, ?, ?, ?, ?, ?)'
+  ).bind(id, email.toLowerCase(), passwordHash, name, role, 'pending').run();
+
+  return json({ message: 'Your account request has been submitted. A Super Admin will review and approve it.' }, 201);
 });
 
 // ── Sports ────────────────────────────────────────────────────────────────────
@@ -275,10 +280,12 @@ app.get('/api/requests', async c => {
   `;
   const params: (string | number)[] = [];
 
-  if (user.role === 'coach') {
-    query += ' AND ir.coach_email = ?'; params.push(user.email);
+  // Coaches now see ALL requests (anonymous coach model).
+  // Sport admins see only their assigned sport's requests.
+  if (user.role === 'sport_admin' && user.sportId) {
+    query += ' AND ir.sport = ?'; params.push(user.sportId);
   }
-  // sport_admin and CFO see all requests
+  // cfo and super_admin see all requests
 
   if (sport) { query += ' AND ir.sport = ?'; params.push(sport); }
   if (term) { query += ' AND ir.term LIKE ?'; params.push(`%${term}%`); }
@@ -299,11 +306,15 @@ app.post('/api/requests', async c => {
   if (user.role !== 'coach') return err('Only coaches can submit requests', 403);
 
   const body = await c.req.json<{
-    athletes: { studentName: string; rocketNumber: string; sport: string }[];
+    athletes: { studentName: string; rocketNumber: string }[];
     term: string;
+    coachName: string;
+    sport: string;
   }>();
 
   if (!body.athletes?.length || !body.term) return err('Missing athletes or term');
+  if (!body.coachName?.trim()) return err('Coach name is required');
+  if (!body.sport) return err('Sport is required');
 
   if (!isBeforeDeadline(body.term)) {
     return err('Submission deadline has passed for this term', 422);
@@ -312,6 +323,8 @@ app.post('/api/requests', async c => {
   const premiumCost = getPremiumForTerm(body.term);
   if (!premiumCost) return err('Unknown term', 400);
 
+  const coachName = body.coachName.trim();
+  const sport = body.sport;
   const created = [];
 
   for (const athlete of body.athletes) {
@@ -319,18 +332,17 @@ app.post('/api/requests', async c => {
     if (!validateRocketNumber(athlete.rocketNumber)) {
       return err(`Invalid Rocket Number: ${athlete.rocketNumber}`);
     }
-    if (!athlete.sport) return err('Sport is required');
 
     const duplicate = await c.env.DB.prepare(
       'SELECT id FROM insurance_requests WHERE rocket_number = ? AND term = ? AND sport = ?'
-    ).bind(athlete.rocketNumber, body.term, athlete.sport).first();
+    ).bind(athlete.rocketNumber, body.term, sport).first();
     if (duplicate) {
       return err(`A request already exists for ${athlete.rocketNumber} in ${body.term} for this sport`);
     }
 
     const id = newUUID();
     const ip = c.req.header('CF-Connecting-IP') ?? c.req.header('X-Forwarded-For') ?? 'unknown';
-    const isSoftball = athlete.sport === 'womens_softball';
+    const isSoftball = sport === 'womens_softball';
     const initialStatus = isSoftball ? 'PENDING_CFO' : 'PENDING_SPORT_ADMIN';
 
     await c.env.DB.prepare(`
@@ -338,21 +350,21 @@ app.post('/api/requests', async c => {
         (id, student_name, rocket_number, sport, term, premium_cost, status, coach_email, coach_name)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
-      id, athlete.studentName.trim(), athlete.rocketNumber, athlete.sport,
-      body.term, premiumCost, initialStatus, user.email, user.name
+      id, athlete.studentName.trim(), athlete.rocketNumber, sport,
+      body.term, premiumCost, initialStatus, null, coachName
     ).run();
 
     // Coach signature
     await c.env.DB.prepare(`
       INSERT INTO signatures (id, request_id, signatory_role, signatory_email, signatory_name, ip_address)
       VALUES (?, ?, 'COACH', ?, ?, ?)
-    `).bind(newUUID(), id, user.email, user.name, ip).run();
+    `).bind(newUUID(), id, '', coachName, ip).run();
 
     // Audit log
     await c.env.DB.prepare(`
       INSERT INTO audit_log (id, request_id, action, performed_by, details)
       VALUES (?, ?, 'SUBMITTED', ?, ?)
-    `).bind(newUUID(), id, user.email, JSON.stringify({ status: initialStatus })).run();
+    `).bind(newUUID(), id, coachName, JSON.stringify({ status: initialStatus })).run();
 
     // Get sport admin for notification
     const sportRow = await c.env.DB.prepare(`
@@ -360,17 +372,17 @@ app.post('/api/requests', async c => {
       FROM sports_programs sp
       LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
       WHERE sp.id = ?
-    `).bind(athlete.sport).first<{ sportName: string; adminEmail: string | null; adminName: string | null }>();
+    `).bind(sport).first<{ sportName: string; adminEmail: string | null; adminName: string | null }>();
 
     const emailData = {
       studentName: athlete.studentName.trim(),
       rocketNumber: athlete.rocketNumber,
-      sport: athlete.sport,
-      sportName: sportRow?.sportName ?? athlete.sport,
+      sport,
+      sportName: sportRow?.sportName ?? sport,
       term: body.term,
       premiumCost,
-      coachName: user.name,
-      coachEmail: user.email,
+      coachName,
+      coachEmail: '',
       requestId: id,
       status: initialStatus,
     };
@@ -382,7 +394,7 @@ app.post('/api/requests', async c => {
       await notifyPendingSportAdmin(c.env, emailData, sportRow.adminEmail);
     }
 
-    created.push({ id, studentName: athlete.studentName.trim(), rocketNumber: athlete.rocketNumber, sport: athlete.sport, term: body.term, premiumCost, status: initialStatus, coachEmail: user.email, coachName: user.name });
+    created.push({ id, studentName: athlete.studentName.trim(), rocketNumber: athlete.rocketNumber, sport, term: body.term, premiumCost, status: initialStatus, coachEmail: null, coachName });
   }
 
   return json(created, 201);
@@ -409,8 +421,7 @@ app.get('/api/requests/:id', async c => {
 
   if (!req) return err('Not found', 404);
 
-  // RBAC check
-  if (user.role === 'coach' && req.coachEmail !== user.email) return err('Forbidden', 403);
+  // RBAC check — coaches can now view all requests (anonymous model)
 
   const { results: sigs } = await c.env.DB.prepare(`
     SELECT id, request_id as requestId, signatory_role as signatoryRole,
@@ -421,12 +432,12 @@ app.get('/api/requests/:id', async c => {
   return json({ ...req, signatures: sigs });
 });
 
-// POST /api/requests/:id/sign — in-app signing for sport admin and CFO
+// POST /api/requests/:id/sign — in-app signing for sport admin, CFO, and super_admin
 app.post('/api/requests/:id/sign', async c => {
   const user = await getUser(c.req.raw, c.env.JWT_SECRET);
   if (!user) return err('Unauthorized', 401);
-  if (user.role !== 'sport_admin' && user.role !== 'cfo') {
-    return err('Only sport admins and CFO can sign in-app', 403);
+  if (user.role !== 'sport_admin' && user.role !== 'cfo' && user.role !== 'super_admin') {
+    return err('Only sport admins, CFO, and super admins can sign in-app', 403);
   }
 
   const { id } = c.req.param();
@@ -445,7 +456,15 @@ app.post('/api/requests/:id/sign', async c => {
   if (!req) return err('Not found', 404);
 
   // Determine expected signer role
-  const sigRole = user.role === 'cfo' ? 'CFO' : 'SPORT_ADMIN';
+  // Super admin can sign as either SPORT_ADMIN or CFO depending on current status
+  let sigRole: string;
+  if (user.role === 'super_admin') {
+    if (req.status === 'PENDING_SPORT_ADMIN') sigRole = 'SPORT_ADMIN';
+    else if (req.status === 'PENDING_CFO') sigRole = 'CFO';
+    else return err('This request is not awaiting any approval', 409);
+  } else {
+    sigRole = user.role === 'cfo' ? 'CFO' : 'SPORT_ADMIN';
+  }
 
   // Validate status matches the expected signer
   if (sigRole === 'SPORT_ADMIN' && req.status !== 'PENDING_SPORT_ADMIN') {
@@ -557,8 +576,7 @@ app.get('/api/requests/:id/pdf', async c => {
 
   if (!req) return err('Not found', 404);
 
-  // RBAC
-  if (user.role === 'coach' && req.coachEmail !== user.email) return err('Forbidden', 403);
+  // RBAC — coaches can view all in anonymous model
 
   const { results: sigs } = await c.env.DB.prepare(`
     SELECT signatory_role as role, signatory_name as name, timestamp
@@ -591,11 +609,11 @@ app.get('/api/requests/:id/pdf', async c => {
   });
 });
 
-// POST /api/requests/:id/void — CFO only
+// POST /api/requests/:id/void — CFO or super_admin
 app.post('/api/requests/:id/void', async c => {
   const user = await getUser(c.req.raw, c.env.JWT_SECRET);
   if (!user) return err('Unauthorized', 401);
-  if (user.role !== 'cfo') return err('Only CFO can void requests', 403);
+  if (user.role !== 'cfo' && user.role !== 'super_admin') return err('Only CFO or Super Admin can void requests', 403);
 
   const { id } = c.req.param();
   const { reason } = await c.req.json<{ reason: string }>();
@@ -641,12 +659,12 @@ app.post('/api/requests/:id/void', async c => {
   return json({ id, status: 'VOIDED' });
 });
 
-// ── Reports (CFO only) ────────────────────────────────────────────────────────
+// ── Reports (CFO and super_admin) ────────────────────────────────────────────
 
 app.get('/api/reports', async c => {
   const user = await getUser(c.req.raw, c.env.JWT_SECRET);
   if (!user) return err('Unauthorized', 401);
-  if (user.role !== 'cfo') return err('Forbidden', 403);
+  if (user.role !== 'cfo' && user.role !== 'super_admin') return err('Forbidden', 403);
 
   const { sport, term, status, coach } = c.req.query();
   let query = `
@@ -672,11 +690,11 @@ app.get('/api/reports', async c => {
   return json(results);
 });
 
-// GET /api/reports/csv — CFO only, CSV download
+// GET /api/reports/csv — CFO and super_admin, CSV download
 app.get('/api/reports/csv', async c => {
   const user = await getUser(c.req.raw, c.env.JWT_SECRET);
   if (!user) return err('Unauthorized', 401);
-  if (user.role !== 'cfo') return err('Forbidden', 403);
+  if (user.role !== 'cfo' && user.role !== 'super_admin') return err('Forbidden', 403);
 
   const { sport, term, status, coach } = c.req.query();
   let query = `
@@ -734,25 +752,27 @@ function csvEscape(value: string): string {
 
 // ── Admin — users ─────────────────────────────────────────────────────────────
 
+const isAdmin = (role: string) => role === 'cfo' || role === 'super_admin';
+
 app.get('/api/admin/users', async c => {
   const user = await getUser(c.req.raw, c.env.JWT_SECRET);
-  if (!user || user.role !== 'cfo') return err('Forbidden', 403);
+  if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
   const { results } = await c.env.DB.prepare(
-    'SELECT id, email, name, role, sport_id as sportId, must_change_password as mustChangePassword, created_at as createdAt FROM users ORDER BY created_at DESC'
+    'SELECT id, email, name, role, sport_id as sportId, must_change_password as mustChangePassword, status, created_at as createdAt FROM users ORDER BY created_at DESC'
   ).all();
   return json(results);
 });
 
 app.post('/api/admin/users', async c => {
   const user = await getUser(c.req.raw, c.env.JWT_SECRET);
-  if (!user || user.role !== 'cfo') return err('Forbidden', 403);
+  if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
 
   const { email, password, name, role, sportId } = await c.req.json<{
     email: string; password: string; name: string; role: string; sportId?: string;
   }>();
 
   if (!email || !password || !name || !role) return err('Missing required fields');
-  if (!['coach', 'sport_admin', 'cfo'].includes(role)) return err('Invalid role');
+  if (!['coach', 'sport_admin', 'cfo', 'super_admin'].includes(role)) return err('Invalid role');
   if (password.length < 8) return err('Password must be at least 8 characters');
 
   const exists = await c.env.DB.prepare('SELECT id FROM users WHERE email = ?')
@@ -762,25 +782,110 @@ app.post('/api/admin/users', async c => {
   const id = newUUID();
   const passwordHash = await hashPassword(password);
   await c.env.DB.prepare(
-    'INSERT INTO users (id, email, password_hash, name, role, sport_id, must_change_password) VALUES (?, ?, ?, ?, ?, ?, 1)'
-  ).bind(id, email.toLowerCase(), passwordHash, name, role, sportId ?? null).run();
+    'INSERT INTO users (id, email, password_hash, name, role, sport_id, must_change_password, status) VALUES (?, ?, ?, ?, ?, ?, 1, ?)'
+  ).bind(id, email.toLowerCase(), passwordHash, name, role, sportId ?? null, 'active').run();
 
-  return json({ id, email: email.toLowerCase(), name, role, sportId: sportId ?? null, mustChangePassword: 1, createdAt: new Date().toISOString() }, 201);
+  return json({ id, email: email.toLowerCase(), name, role, sportId: sportId ?? null, mustChangePassword: 1, status: 'active', createdAt: new Date().toISOString() }, 201);
 });
 
 app.delete('/api/admin/users/:id', async c => {
   const user = await getUser(c.req.raw, c.env.JWT_SECRET);
-  if (!user || user.role !== 'cfo') return err('Forbidden', 403);
+  if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
   const { id } = c.req.param();
   if (id === user.sub) return err('Cannot delete your own account', 400);
   await c.env.DB.prepare('DELETE FROM users WHERE id = ?').bind(id).run();
   return json({ ok: true });
 });
 
+// PUT /api/admin/users/:id/approve — approve pending user
+app.put('/api/admin/users/:id/approve', async c => {
+  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  if (!user || user.role !== 'super_admin') return err('Only Super Admin can approve users', 403);
+  const { id } = c.req.param();
+  await c.env.DB.prepare('UPDATE users SET status = ? WHERE id = ? AND status = ?')
+    .bind('active', id, 'pending').run();
+  return json({ ok: true });
+});
+
+// PUT /api/admin/users/:id/reject — reject pending user
+app.put('/api/admin/users/:id/reject', async c => {
+  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  if (!user || user.role !== 'super_admin') return err('Only Super Admin can reject users', 403);
+  const { id } = c.req.param();
+  await c.env.DB.prepare('UPDATE users SET status = ? WHERE id = ? AND status = ?')
+    .bind('rejected', id, 'pending').run();
+  return json({ ok: true });
+});
+
+// POST /api/requests/bulk-sign — bulk approve for sport admin, CFO, and super_admin
+app.post('/api/requests/bulk-sign', async c => {
+  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  if (!user) return err('Unauthorized', 401);
+  if (user.role !== 'sport_admin' && user.role !== 'cfo' && user.role !== 'super_admin') {
+    return err('Only sport admins, CFO, and super admins can bulk sign', 403);
+  }
+
+  const { ids } = await c.req.json<{ ids: string[] }>();
+  if (!ids?.length) return err('No request IDs provided');
+
+  const ip = c.req.header('cf-connecting-ip') ?? c.req.header('x-forwarded-for') ?? 'unknown';
+  const results: { id: string; status: string }[] = [];
+
+  for (const id of ids) {
+    const req = await c.env.DB.prepare(`
+      SELECT ir.id, ir.status, ir.sport
+      FROM insurance_requests ir
+      WHERE ir.id = ?
+    `).bind(id).first<{ id: string; status: string; sport: string }>();
+
+    if (!req) continue;
+
+    let sigRole: string;
+    if (user.role === 'super_admin') {
+      if (req.status === 'PENDING_SPORT_ADMIN') sigRole = 'SPORT_ADMIN';
+      else if (req.status === 'PENDING_CFO') sigRole = 'CFO';
+      else continue;
+    } else {
+      sigRole = user.role === 'cfo' ? 'CFO' : 'SPORT_ADMIN';
+    }
+
+    if (sigRole === 'SPORT_ADMIN' && req.status !== 'PENDING_SPORT_ADMIN') continue;
+    if (sigRole === 'CFO' && req.status !== 'PENDING_CFO') continue;
+
+    const existing = await c.env.DB.prepare(
+      'SELECT id FROM signatures WHERE request_id = ? AND signatory_role = ?'
+    ).bind(id, sigRole).first();
+    if (existing) continue;
+
+    await c.env.DB.prepare(`
+      INSERT INTO signatures (id, request_id, signatory_role, signatory_email, signatory_name, ip_address)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(newUUID(), id, sigRole, user.email, user.name, ip).run();
+
+    await c.env.DB.prepare(`
+      INSERT INTO audit_log (id, request_id, action, performed_by, details)
+      VALUES (?, ?, 'SIGNED', ?, ?)
+    `).bind(newUUID(), id, user.email, JSON.stringify({ role: sigRole, bulk: true })).run();
+
+    let newStatus: string;
+    if (sigRole === 'SPORT_ADMIN') {
+      newStatus = 'PENDING_CFO';
+    } else {
+      newStatus = 'EXECUTED';
+    }
+    await c.env.DB.prepare('UPDATE insurance_requests SET status = ? WHERE id = ?')
+      .bind(newStatus, id).run();
+
+    results.push({ id, status: newStatus });
+  }
+
+  return json({ signed: results.length, results });
+});
+
 // PUT /api/admin/sports/:id — update sport admin assignment
 app.put('/api/admin/sports/:id', async c => {
   const user = await getUser(c.req.raw, c.env.JWT_SECRET);
-  if (!user || user.role !== 'cfo') return err('Forbidden', 403);
+  if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
   const { id } = c.req.param();
   const { adminId } = await c.req.json<{ adminId: string | null }>();
   await c.env.DB.prepare('UPDATE sports_programs SET sport_admin_id = ? WHERE id = ?')
