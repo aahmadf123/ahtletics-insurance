@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '../../lib/auth';
 import { listUsers, createUser, deleteUser, approveUser, rejectUser, listSports } from '../../lib/api';
 import type { AdminUser } from '../../lib/api';
@@ -20,13 +20,13 @@ export function AdminUsers() {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState('');
 
-  const refresh = () => {
+  const refresh = useCallback(() => {
     setLoading(true);
     Promise.all([listUsers(), listSports()])
       .then(([u, s]) => { setUsers(u); setSports(s); })
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
-  };
+  }, []);
 
   useEffect(() => {
     refresh();

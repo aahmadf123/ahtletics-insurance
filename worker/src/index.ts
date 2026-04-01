@@ -197,7 +197,7 @@ app.post('/auth/select', async c => {
   const email = 'anonymous@coaches.utoledo.edu';
   const name = 'Coach';
 
-  const sub = `coach_anonymous_${Date.now()}`;
+  const sub = `coach_anonymous_${newUUID()}`;
   const payload = {
     sub,
     email,
