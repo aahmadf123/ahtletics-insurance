@@ -39,8 +39,8 @@ export function Reports() {
       .finally(() => setLoading(false));
   }, [filterSport, filterTerm, filterStatus, filterCoach]);
 
-  if (user?.role !== 'cfo') {
-    return <div className="page"><p className="error">Access denied. CFO only.</p></div>;
+  if (user?.role !== 'cfo' && user?.role !== 'super_admin') {
+    return <div className="page"><p className="error">Access denied. CFO or Super Admin only.</p></div>;
   }
 
   const totalPremium = rows

@@ -7,7 +7,7 @@ import {
   notifyPendingSportAdmin, notifyPendingCFO, notifyExecuted, notifyVoided, notifyReminder,
 } from './lib/email';
 import {
-  validateRocketNumber, isBeforeDeadline, getPremiumForTerm, newUUID,
+  validateRocketNumber, isBeforeDeadline, getPremiumForTerm, getSubmissionDeadline, newUUID,
 } from './lib/validation';
 import { buildInsuranceFormPdf, type PdfFormData } from './lib/pdf';
 
@@ -591,6 +591,7 @@ app.get('/api/requests/:id/pdf', async c => {
     premiumCost: `$${req.premiumCost.toFixed(2)}`,
     coachName: req.coachName,
     coachEmail: req.coachEmail,
+    submissionDeadline: getSubmissionDeadline(req.term),
     signatures: sigs.map(s => ({
       role: s.role as 'COACH' | 'SPORT_ADMIN' | 'CFO',
       name: s.name,

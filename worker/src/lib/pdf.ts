@@ -181,24 +181,10 @@ export async function buildInsuranceFormPdf(data: PdfFormData, logoPngBytes?: Ui
   ]);
   y -= 6;
 
-  // Row 3: Address
+  // Row 3: Coach Name, Sport (form-level fields for anonymous coach model)
   y = drawFieldRow(page, helvetica, y, [
-    { label: 'Campus / Mailing Address', value: '', width: USABLE },
-  ]);
-  y -= 6;
-
-  // Row 4: City, State, ZIP
-  y = drawFieldRow(page, helvetica, y, [
-    { label: 'City', value: '', width: half },
-    { label: 'State', value: '', width: third - 20 },
-    { label: 'ZIP Code', value: '', width: USABLE - half - third + 20 },
-  ]);
-  y -= 6;
-
-  // Row 5: Phone, Email
-  y = drawFieldRow(page, helvetica, y, [
-    { label: 'Phone Number', value: '', width: half },
-    { label: 'UT Email Address', value: '', width: half },
+    { label: 'Coach Name', value: data.coachName, width: half },
+    { label: 'Sport', value: data.sport, width: half },
   ]);
   y -= 12;
 

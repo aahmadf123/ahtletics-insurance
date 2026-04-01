@@ -29,6 +29,18 @@ export function getPremiumForTerm(term: string): number {
   return premiums[termKey] ?? 0;
 }
 
+/** Get the submission deadline string for a given term (e.g. "Fall 2026" → "September 8, 2026") */
+export function getSubmissionDeadline(term: string): string {
+  const termKey = term.split(' ')[0];
+  const year = term.split(' ')[1] ?? String(new Date().getFullYear());
+  const deadlineNames: Record<string, string> = {
+    Fall: `September 8, ${year}`,
+    'Spring/Summer': `January 26, ${year}`,
+    Summer: `July 1, ${year}`,
+  };
+  return deadlineNames[termKey] ?? `September 8, ${year}`;
+}
+
 export function newUUID(): string {
   return crypto.randomUUID();
 }
