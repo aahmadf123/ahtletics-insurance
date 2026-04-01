@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, Link, useNavigate } from 'react-router-dom';
 import { AuthContext } from './lib/auth';
-import { getMe, selectIdentity as apiSelectIdentity, logout as apiLogout } from './lib/api';
+import { getMe, selectIdentity as apiSelectIdentity, login as apiLogin, logout as apiLogout } from './lib/api';
 import type { User } from './types';
 
 import { Login } from './pages/Login';
+import { Register } from './pages/Register';
 import { Dashboard } from './pages/Dashboard';
 import { NewRequest } from './pages/request/New';
 import { RequestDetail } from './pages/request/Detail';
@@ -20,12 +21,12 @@ function Nav({ user, onLogout }: { user: User; onLogout: () => void }) {
       <div className="navbar-links">
         <Link to="/dashboard">Dashboard</Link>
         {user.role === 'coach' && <Link to="/request/new">New Request</Link>}
-        {user.role === 'cfo' && <Link to="/reports">Reports</Link>}
-        {user.role === 'cfo' && <Link to="/admin/users">Users</Link>}
+        {(user.role === 'cfo' || user.role === 'super_admin') && <Link to="/reports">Reports</Link>}
+        {(user.role === 'cfo' || user.role === 'super_admin') && <Link to="/admin/users">Users</Link>}
       </div>
       <div className="navbar-user">
         <span className="navbar-name">{user.name}</span>
-        <span className="badge">{user.role.replace('_', ' ')}</span>
+        <span className="badge">{user.role.replace(/_/g, ' ')}</span>
         <button className="btn-logout" onClick={onLogout}>Sign Out</button>
       </div>
     </nav>
@@ -50,8 +51,13 @@ function AppLayout() {
     refresh().finally(() => setLoading(false));
   }, [refresh]);
 
-  const selectIdentity = async (role: string, sportId?: string, adminId?: string) => {
-    const u = await apiSelectIdentity(role, sportId, adminId);
+  const selectIdentity = async (role: string) => {
+    const u = await apiSelectIdentity(role);
+    setUser(u);
+  };
+
+  const login = async (email: string, password: string) => {
+    const u = await apiLogin(email, password);
     setUser(u);
   };
 
@@ -64,11 +70,12 @@ function AppLayout() {
   if (loading) return <div className="loading-screen"><p>Loading…</p></div>;
 
   return (
-    <AuthContext.Provider value={{ user, loading, selectIdentity, logout, refresh }}>
+    <AuthContext.Provider value={{ user, loading, selectIdentity, login, logout, refresh }}>
       {user && <Nav user={user} onLogout={logout} />}
       <main className="main-content">
         <Routes>
           <Route path="/login" element={user ? <Navigate to="/dashboard" replace /> : <Login />} />
+          <Route path="/register" element={user ? <Navigate to="/dashboard" replace /> : <Register />} />
           <Route path="/dashboard" element={
             !user ? <Navigate to="/login" replace /> : <Dashboard />
           } />

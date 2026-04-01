@@ -1,48 +1,21 @@
-import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
-import { getIdentities } from '../lib/api';
-import type { IdentityData } from '../lib/api';
 
 export function Login() {
-  const { selectIdentity } = useAuth();
+  const { selectIdentity, login } = useAuth();
   const navigate = useNavigate();
 
-  const [identities, setIdentities] = useState<IdentityData | null>(null);
   const [role, setRole] = useState<string | null>(null);
-  const [sportId, setSportId] = useState('');
-  const [adminId, setAdminId] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [pageLoading, setPageLoading] = useState(true);
 
-  useEffect(() => {
-    getIdentities()
-      .then(setIdentities)
-      .catch(err => setError(err.message))
-      .finally(() => setPageLoading(false));
-  }, []);
-
-  const getSelectedInfo = () => {
-    if (!identities) return null;
-    if (role === 'coach' && sportId) {
-      const c = identities.coaches.find(x => x.sportId === sportId);
-      return c ? { name: c.coachName, detail: `${c.sportName} (${c.gender})` } : null;
-    }
-    if (role === 'sport_admin' && adminId) {
-      const a = identities.admins.find(x => x.id === adminId);
-      return a ? { name: a.name, detail: a.title } : null;
-    }
-    if (role === 'cfo' && identities.cfo) {
-      return { name: identities.cfo.name, detail: identities.cfo.title };
-    }
-    return null;
-  };
+  const needsCredentials = role === 'sport_admin' || role === 'cfo' || role === 'super_admin';
 
   const canContinue = role && (
-    (role === 'coach' && sportId) ||
-    (role === 'sport_admin' && adminId) ||
-    role === 'cfo'
+    role === 'coach' || (needsCredentials && email && password)
   );
 
   const handleContinue = async () => {
@@ -50,11 +23,11 @@ export function Login() {
     setError('');
     setLoading(true);
     try {
-      await selectIdentity(
-        role!,
-        role === 'coach' ? sportId : undefined,
-        role === 'sport_admin' ? adminId : undefined,
-      );
+      if (role === 'coach') {
+        await selectIdentity('coach');
+      } else {
+        await login(email, password);
+      }
       navigate('/dashboard');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to enter portal');
@@ -62,8 +35,6 @@ export function Login() {
       setLoading(false);
     }
   };
-
-  const selected = getSelectedInfo();
 
   return (
     <div className="auth-page">
@@ -103,99 +74,91 @@ export function Login() {
 
       {/* Right interactive panel */}
       <div className="auth-panel-right">
-        {pageLoading ? (
-          <div className="auth-right-content">
-            <div className="auth-loading">Loading portal…</div>
-          </div>
-        ) : (
-          <div className="auth-right-content">
-            <h2 className="auth-welcome">Welcome</h2>
-            <p className="auth-instruction">Select your role to get started</p>
+        <div className="auth-right-content">
+          <h2 className="auth-welcome">Welcome</h2>
+          <p className="auth-instruction">Select your role to get started</p>
 
-            <div className="auth-role-cards">
-              {[
-                { value: 'coach', label: 'Coach', desc: 'Submit insurance requests for your athletes' },
-                { value: 'sport_admin', label: 'Sport Administrator', desc: 'Review and approve requests for your sports' },
-                { value: 'cfo', label: 'CFO', desc: 'Final approval, reports & user management' },
-              ].map(r => (
-                <button
-                  key={r.value}
-                  type="button"
-                  className={`auth-role-card ${role === r.value ? 'auth-role-card--active' : ''}`}
-                  onClick={() => {
-                    setRole(r.value);
-                    setSportId('');
-                    setAdminId('');
-                    setError('');
-                  }}
-                >
-                  <div className="auth-role-card-radio">
-                    {role === r.value && <div className="auth-role-card-radio-dot" />}
-                  </div>
-                  <div className="auth-role-card-text">
-                    <strong>{r.label}</strong>
-                    <span>{r.desc}</span>
-                  </div>
-                </button>
-              ))}
+          <div className="auth-role-cards">
+            {[
+              { value: 'coach', label: 'Coach', desc: 'Submit insurance requests for your athletes' },
+              { value: 'sport_admin', label: 'Sport Administrator', desc: 'Review and approve requests for your sports' },
+              { value: 'cfo', label: 'CFO', desc: 'Final approval, reports & user management' },
+              { value: 'super_admin', label: 'Super Admin', desc: 'Full oversight, user approvals & system management' },
+            ].map(r => (
+              <button
+                key={r.value}
+                type="button"
+                className={`auth-role-card ${role === r.value ? 'auth-role-card--active' : ''}`}
+                onClick={() => {
+                  setRole(r.value);
+                  setEmail('');
+                  setPassword('');
+                  setError('');
+                }}
+              >
+                <div className="auth-role-card-radio">
+                  {role === r.value && <div className="auth-role-card-radio-dot" />}
+                </div>
+                <div className="auth-role-card-text">
+                  <strong>{r.label}</strong>
+                  <span>{r.desc}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+
+          {needsCredentials && (
+            <div className="auth-selector" style={{ animationDelay: '0s' }}>
+              <div className="field" style={{ marginBottom: '12px' }}>
+                <label htmlFor="login-email">Email</label>
+                <input
+                  id="login-email"
+                  type="email"
+                  value={email}
+                  onChange={e => setEmail(e.target.value)}
+                  placeholder="you@utoledo.edu"
+                  autoComplete="email"
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="login-password">Password</label>
+                <input
+                  id="login-password"
+                  type="password"
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  placeholder="Enter your password"
+                  autoComplete="current-password"
+                />
+              </div>
+              <p style={{ fontSize: '0.85rem', marginTop: '8px', color: '#666' }}>
+                Don't have an account?{' '}
+                <Link to="/register" style={{ color: '#1B2A4A', fontWeight: 600 }}>
+                  Request Access
+                </Link>
+              </p>
             </div>
+          )}
 
-            {role === 'coach' && (
-              <div className="auth-selector" style={{ animationDelay: '0s' }}>
-                <label htmlFor="sport-select">Select your sport</label>
-                <select
-                  id="sport-select"
-                  value={sportId}
-                  onChange={e => setSportId(e.target.value)}
-                >
-                  <option value="">Choose a sport…</option>
-                  {identities?.coaches.map(c => (
-                    <option key={c.sportId} value={c.sportId}>
-                      {c.sportName} ({c.gender}) — {c.coachName}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
+          {role === 'coach' && (
+            <div className="auth-identity-confirm">
+              <div className="auth-identity-label">You'll enter as</div>
+              <div className="auth-identity-name">Coach</div>
+              <div className="auth-identity-detail">Anonymous coach — enter your name in the request form</div>
+            </div>
+          )}
 
-            {role === 'sport_admin' && (
-              <div className="auth-selector" style={{ animationDelay: '0s' }}>
-                <label htmlFor="admin-select">Select your profile</label>
-                <select
-                  id="admin-select"
-                  value={adminId}
-                  onChange={e => setAdminId(e.target.value)}
-                >
-                  <option value="">Choose your name…</option>
-                  {identities?.admins.map(a => (
-                    <option key={a.id} value={a.id}>
-                      {a.name} — {a.title}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
+          {error && <div className="auth-error">{error}</div>}
 
-            {selected && (
-              <div className="auth-identity-confirm">
-                <div className="auth-identity-label">You'll enter as</div>
-                <div className="auth-identity-name">{selected.name}</div>
-                <div className="auth-identity-detail">{selected.detail}</div>
-              </div>
-            )}
-
-            {error && <div className="auth-error">{error}</div>}
-
-            <button
-              className={`auth-submit ${canContinue ? '' : 'auth-submit--disabled'}`}
-              onClick={handleContinue}
-              disabled={!canContinue || loading}
-            >
-              {loading ? <span className="auth-spinner" /> : null}
-              {loading ? 'Entering portal…' : 'Continue to Portal'}
-            </button>
-          </div>
-        )}
+          <button
+            className={`auth-submit ${canContinue ? '' : 'auth-submit--disabled'}`}
+            onClick={handleContinue}
+            disabled={!canContinue || loading}
+          >
+            {loading ? <span className="auth-spinner" /> : null}
+            {loading ? 'Entering portal…' : 'Continue to Portal'}
+          </button>
+        </div>
       </div>
     </div>
   );

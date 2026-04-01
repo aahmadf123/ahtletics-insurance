@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../lib/auth';
 import { listSports, submitRequest } from '../../lib/api';
 import { PremiumDisplay } from '../../components/PremiumDisplay';
+import { DisclaimerCheckboxes } from '../../components/DisclaimerCheckboxes';
 import { TERM_OPTIONS } from '../../types';
 import type { SportProgram, AthleteEntry } from '../../types';
 
@@ -13,10 +14,11 @@ const TERMS = TERM_OPTIONS.map(t => ({
   label: `${t.label} ${t.label === 'Fall' ? CURRENT_YEAR : CURRENT_YEAR + 1}`,
   premium: t.premium,
   termKey: t.label,
+  deadline: t.deadline,
 }));
 
-function emptyAthlete(sportId?: string): AthleteEntry {
-  return { studentName: '', rocketNumber: '', sport: sportId ?? '' };
+function emptyAthlete(): AthleteEntry {
+  return { studentName: '', rocketNumber: '' };
 }
 
 function validateRocket(val: string): string {
@@ -30,11 +32,12 @@ export function NewRequest() {
 
   const [sports, setSports] = useState<SportProgram[]>([]);
   const [term, setTerm] = useState('');
-  const [athletes, setAthletes] = useState<AthleteEntry[]>([emptyAthlete(user?.sportId)]);
+  const [coachName, setCoachName] = useState('');
+  const [sport, setSport] = useState('');
+  const [athletes, setAthletes] = useState<AthleteEntry[]>([emptyAthlete()]);
+  const [allAcknowledged, setAllAcknowledged] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
-
-  const coachSportId = user?.sportId;
 
   useEffect(() => {
     listSports().then(setSports).catch(console.error);
@@ -45,6 +48,8 @@ export function NewRequest() {
   }
 
   const selectedTerm = TERMS.find(t => t.value === term);
+  const year = selectedTerm ? selectedTerm.value.split(' ').pop() : '';
+  const deadline = selectedTerm ? `${selectedTerm.deadline}, ${year}` : '';
 
   const updateAthlete = (index: number, field: keyof AthleteEntry, value: string) => {
     setAthletes(prev => prev.map((a, i) => {
@@ -55,7 +60,7 @@ export function NewRequest() {
     }));
   };
 
-  const addAthlete = () => setAthletes(prev => [...prev, emptyAthlete(coachSportId)]);
+  const addAthlete = () => setAthletes(prev => [...prev, emptyAthlete()]);
 
   const removeAthlete = (index: number) => {
     if (athletes.length === 1) return;
@@ -63,9 +68,9 @@ export function NewRequest() {
   };
 
   const athletesValid = athletes.every(
-    a => a.studentName.trim() && /^R\d{8}$/.test(a.rocketNumber) && (coachSportId || a.sport) && !a.rocketError
+    a => a.studentName.trim() && /^R\d{8}$/.test(a.rocketNumber) && !a.rocketError
   );
-  const canSubmit = term && athletesValid;
+  const canSubmit = term && coachName.trim() && sport && athletesValid && allAcknowledged;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -77,11 +82,11 @@ export function NewRequest() {
         athletes: athletes.map(a => ({
           studentName: a.studentName.trim(),
           rocketNumber: a.rocketNumber,
-          sport: coachSportId || a.sport,
         })),
         term,
+        coachName: coachName.trim(),
+        sport,
       });
-      // For a single request, navigate to its detail page
       if (results.length === 1) {
         navigate(`/request/${results[0].id}`);
       } else {
@@ -103,7 +108,38 @@ export function NewRequest() {
       </p>
 
       <form className="form-card" onSubmit={handleSubmit}>
-        {/* Term selection — shared across all athletes */}
+        {/* Coach Information */}
+        <fieldset className="fieldset">
+          <legend>Coach Information</legend>
+          <div className="athlete-row-fields">
+            <div className="field">
+              <label>Coach Name *</label>
+              <input
+                type="text"
+                value={coachName}
+                onChange={e => setCoachName(e.target.value)}
+                placeholder="Your full name"
+                required
+                maxLength={200}
+              />
+            </div>
+            <div className="field">
+              <label>Sport *</label>
+              <select
+                value={sport}
+                onChange={e => setSport(e.target.value)}
+                required
+              >
+                <option value="">Select a sport…</option>
+                {sports.map(s => (
+                  <option key={s.id} value={s.id}>{s.name} ({s.gender})</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </fieldset>
+
+        {/* Term selection */}
         <fieldset className="fieldset">
           <legend>Academic Term</legend>
           <div className="field">
@@ -116,7 +152,7 @@ export function NewRequest() {
             </select>
           </div>
           {selectedTerm && (
-            <PremiumDisplay term={term} premium={selectedTerm.premium} />
+            <PremiumDisplay term={term} premium={selectedTerm.premium} athleteCount={athletes.length} />
           )}
         </fieldset>
 
@@ -167,32 +203,6 @@ export function NewRequest() {
                     <span className="field-error">{athlete.rocketError}</span>
                   )}
                 </div>
-
-                <div className="field">
-                  <label>Sport *</label>
-                  {coachSportId ? (
-                    <>
-                      <input
-                        type="text"
-                        value={sports.find(s => s.id === coachSportId)?.name ?? coachSportId}
-                        disabled
-                        className="field-disabled"
-                      />
-                      <input type="hidden" value={coachSportId} />
-                    </>
-                  ) : (
-                    <select
-                      value={athlete.sport}
-                      onChange={e => updateAthlete(index, 'sport', e.target.value)}
-                      required
-                    >
-                      <option value="">Select a sport…</option>
-                      {sports.map(s => (
-                        <option key={s.id} value={s.id}>{s.name}</option>
-                      ))}
-                    </select>
-                  )}
-                </div>
               </div>
             </div>
           ))}
@@ -200,6 +210,12 @@ export function NewRequest() {
           <button type="button" className="btn btn-secondary btn-add-athlete" onClick={addAthlete}>
             + Add Another Athlete
           </button>
+        </fieldset>
+
+        {/* Disclaimer checkboxes */}
+        <fieldset className="fieldset">
+          <legend>Required Acknowledgments</legend>
+          <DisclaimerCheckboxes deadline={deadline} onChange={setAllAcknowledged} />
         </fieldset>
 
         {error && <p className="error">{error}</p>}
