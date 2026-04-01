@@ -35,10 +35,24 @@ export function getIdentities() {
   return request<IdentityData>('/auth/identities');
 }
 
-export function selectIdentity(role: string, sportId?: string, adminId?: string) {
+export function selectIdentity(role: string) {
   return request<User>('/auth/select', {
     method: 'POST',
-    body: JSON.stringify({ role, sportId, adminId }),
+    body: JSON.stringify({ role }),
+  });
+}
+
+export function login(email: string, password: string) {
+  return request<User>('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+export function register(data: { email: string; password: string; name: string; role: string }) {
+  return request<{ message: string }>('/auth/register', {
+    method: 'POST',
+    body: JSON.stringify(data),
   });
 }
 
@@ -79,6 +93,13 @@ export function signRequest(id: string) {
   return request<{ id: string; status: string }>(`/api/requests/${id}/sign`, { method: 'POST' });
 }
 
+export function bulkSignRequests(ids: string[]) {
+  return request<{ signed: number; results: { id: string; status: string }[] }>('/api/requests/bulk-sign', {
+    method: 'POST',
+    body: JSON.stringify({ ids }),
+  });
+}
+
 export function getRequestPdfUrl(id: string) {
   return `/api/requests/${id}/pdf`;
 }
@@ -109,6 +130,7 @@ export interface AdminUser {
   role: string;
   sportId?: string;
   mustChangePassword: number;
+  status?: string;
   createdAt: string;
 }
 
@@ -131,6 +153,14 @@ export function createUser(data: {
 
 export function deleteUser(id: string) {
   return request<void>(`/api/admin/users/${id}`, { method: 'DELETE' });
+}
+
+export function approveUser(id: string) {
+  return request<{ ok: boolean }>(`/api/admin/users/${id}/approve`, { method: 'PUT' });
+}
+
+export function rejectUser(id: string) {
+  return request<{ ok: boolean }>(`/api/admin/users/${id}/reject`, { method: 'PUT' });
 }
 
 // Admin — sports

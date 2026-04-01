@@ -32,13 +32,10 @@ from reportlab.lib.enums import TA_LEFT, TA_RIGHT
 
 # Path to the official UT logo (light-background version with transparent BG
 # OR the original PNG – black pixels will be stripped automatically).
-LOGO_SOURCE = "Primary_Logo_for_Light_Background.png"
+LOGO_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Primary_Logo_for_Light_Background.png")
 
 # Where to write the finished PDF
 OUTPUT_PDF = "toledo_insurance_auth_v3.pdf"
-
-# Submission deadline shown in Section 2
-SUBMISSION_DEADLINE = "September 8, 2026"
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  BRAND COLOURS
@@ -210,7 +207,7 @@ def sig_row(role: str) -> Table:
 #  MAIN BUILD FUNCTION
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build():
+def build(submission_deadline: str = "September 8, 2026"):
     # ── Prepare logo ────────────────────────────────────────────────────────
     logo_clean = "_logo_clean.png"
     strip_black_background(LOGO_SOURCE, logo_clean)
@@ -311,14 +308,7 @@ def build():
         [third, third, third],
     ))
     story.append(gap(6))
-    story.append(fields(["Campus / Mailing Address"], [USABLE]))
-    story.append(gap(6))
-    story.append(fields(
-        ["City", "State", "ZIP Code"],
-        [half, third - 20, USABLE - half - third + 20],
-    ))
-    story.append(gap(6))
-    story.append(fields(["Phone Number", "UT Email Address"], [half, half]))
+    story.append(fields(["Coach Name", "Sport"], [half, half]))
     story.append(gap(11))
 
     # ── SECTION 2 – ACKNOWLEDGMENTS & AUTHORIZATION ──────────────────────────
@@ -338,7 +328,7 @@ def build():
             "Submission Deadline Acknowledgment",
             f"All requests for health insurance enrollment must be fully executed and submitted "
             f"prior to the start of the semester. The deadline for the upcoming term is "
-            f"{SUBMISSION_DEADLINE}. I acknowledge that requests submitted after this date will "
+            f"{submission_deadline}. I acknowledge that requests submitted after this date will "
             f"be automatically rejected by the system.",
         ),
         (
@@ -404,4 +394,6 @@ def build():
 
 
 if __name__ == "__main__":
-    build()
+    import sys
+    deadline = sys.argv[1] if len(sys.argv) > 1 else "September 8, 2026"
+    build(submission_deadline=deadline)

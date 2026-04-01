@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '../../lib/auth';
-import { listUsers, createUser, deleteUser, listSports } from '../../lib/api';
+import { listUsers, createUser, deleteUser, approveUser, rejectUser, listSports } from '../../lib/api';
 import type { AdminUser } from '../../lib/api';
 import type { SportProgram } from '../../types';
 
@@ -20,16 +20,44 @@ export function AdminUsers() {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState('');
 
-  useEffect(() => {
+  const refresh = useCallback(() => {
+    setLoading(true);
     Promise.all([listUsers(), listSports()])
       .then(([u, s]) => { setUsers(u); setSports(s); })
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
   }, []);
 
-  if (user?.role !== 'cfo') {
-    return <div className="page"><p className="error">Access denied. CFO only.</p></div>;
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  if (user?.role !== 'cfo' && user?.role !== 'super_admin') {
+    return <div className="page"><p className="error">Access denied. CFO or Super Admin only.</p></div>;
   }
+
+  const pendingUsers = users.filter(u => u.status === 'pending');
+  const activeUsers = users.filter(u => u.status !== 'pending');
+
+  const handleApprove = async (id: string, name: string) => {
+    if (!confirm(`Approve account for "${name}"?`)) return;
+    try {
+      await approveUser(id);
+      setUsers(prev => prev.map(u => u.id === id ? { ...u, status: 'active' } : u));
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Approve failed');
+    }
+  };
+
+  const handleReject = async (id: string, name: string) => {
+    if (!confirm(`Reject account request for "${name}"? This cannot be undone.`)) return;
+    try {
+      await rejectUser(id);
+      setUsers(prev => prev.map(u => u.id === id ? { ...u, status: 'rejected' } : u));
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Reject failed');
+    }
+  };
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -99,6 +127,7 @@ export function AdminUsers() {
               <option value="coach">Coach</option>
               <option value="sport_admin">Sport Administrator</option>
               <option value="cfo">CFO</option>
+              <option value="super_admin">Super Admin</option>
             </select>
           </div>
           {newRole === 'coach' && (
@@ -119,18 +148,66 @@ export function AdminUsers() {
 
       {error && <p className="error">{error}</p>}
 
+      {/* Pending Approvals Section */}
+      {pendingUsers.length > 0 && (
+        <div className="form-card" style={{ borderLeft: '4px solid #F5A800', marginBottom: '24px' }}>
+          <h2>Pending Approvals ({pendingUsers.length})</h2>
+          <p style={{ color: '#666', fontSize: '0.875rem', marginBottom: '12px' }}>
+            These accounts were self-registered and are awaiting approval.
+          </p>
+          <div className="table-wrapper">
+            <table className="data-table">
+              <thead>
+                <tr><th>Name</th><th>Email</th><th>Role</th><th>Requested</th><th>Actions</th></tr>
+              </thead>
+              <tbody>
+                {pendingUsers.map(u => (
+                  <tr key={u.id}>
+                    <td>{u.name}</td>
+                    <td>{u.email}</td>
+                    <td><span className="badge">{u.role.replace(/_/g, ' ')}</span></td>
+                    <td>{new Date(u.createdAt).toLocaleDateString()}</td>
+                    <td style={{ display: 'flex', gap: '8px' }}>
+                      <button
+                        className="btn btn-primary"
+                        style={{ padding: '4px 12px', fontSize: '0.8rem' }}
+                        onClick={() => handleApprove(u.id, u.name)}
+                      >
+                        Approve
+                      </button>
+                      <button
+                        className="btn btn-danger"
+                        style={{ padding: '4px 12px', fontSize: '0.8rem' }}
+                        onClick={() => handleReject(u.id, u.name)}
+                      >
+                        Reject
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {loading ? <p className="muted">Loading…</p> : (
         <div className="table-wrapper">
           <table className="data-table">
             <thead>
-              <tr><th>Name</th><th>Email</th><th>Role</th><th>Sport</th><th>Created</th><th></th></tr>
+              <tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Sport</th><th>Created</th><th></th></tr>
             </thead>
             <tbody>
-              {users.map(u => (
+              {activeUsers.map(u => (
                 <tr key={u.id}>
                   <td>{u.name}</td>
                   <td>{u.email}</td>
-                  <td><span className="badge">{u.role}</span></td>
+                  <td><span className="badge">{u.role.replace(/_/g, ' ')}</span></td>
+                  <td>
+                    <span className={`badge ${u.status === 'rejected' ? 'badge--danger' : ''}`}>
+                      {u.status ?? 'active'}
+                    </span>
+                  </td>
                   <td>{sports.find(s => s.id === u.sportId)?.name ?? '—'}</td>
                   <td>{new Date(u.createdAt).toLocaleDateString()}</td>
                   <td>

@@ -2,7 +2,7 @@ export interface JWTPayload {
   sub: string;
   email: string;
   name: string;
-  role: 'coach' | 'sport_admin' | 'cfo';
+  role: 'coach' | 'sport_admin' | 'cfo' | 'super_admin';
   sportId?: string;
   iat: number;
   exp: number;

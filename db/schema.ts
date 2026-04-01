@@ -8,9 +8,10 @@ export const users = sqliteTable("users", {
   email: text("email").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
   name: text("name").notNull(),
-  role: text("role").notNull(), // coach | sport_admin | cfo
+  role: text("role").notNull(), // coach | sport_admin | cfo | super_admin
   sportId: text("sport_id"), // for coaches: their primary sport
   mustChangePassword: integer("must_change_password").notNull().default(0),
+  status: text("status").notNull().default("active"), // active | pending | rejected
   createdAt: text("created_at").default(sql`CURRENT_TIMESTAMP`),
 });
 
@@ -25,7 +26,7 @@ export const insuranceRequests = sqliteTable("insurance_requests", {
   premiumCost: real("premium_cost").notNull(),
   status: text("status").notNull().default("PENDING_SPORT_ADMIN"),
   workflowInstanceId: text("workflow_instance_id"),
-  coachEmail: text("coach_email").notNull(),
+  coachEmail: text("coach_email"), // nullable for anonymous coaches
   coachName: text("coach_name").notNull(),
   createdAt: text("created_at").default(sql`CURRENT_TIMESTAMP`),
 });

@@ -1,4 +1,4 @@
-export type UserRole = 'coach' | 'sport_admin' | 'cfo';
+export type UserRole = 'coach' | 'sport_admin' | 'cfo' | 'super_admin';
 
 export interface User {
   id: string;
@@ -7,6 +7,7 @@ export interface User {
   role: UserRole;
   sportId?: string; // for coaches: their assigned sport
   mustChangePassword?: number;
+  status?: string; // 'active' | 'pending' | 'rejected'
 }
 
 export type RequestStatus =
@@ -25,7 +26,7 @@ export interface InsuranceRequest {
   term: string;
   premiumCost: number;
   status: RequestStatus;
-  coachEmail: string;
+  coachEmail?: string;
   coachName: string;
   createdAt: string;
 }
@@ -71,13 +72,14 @@ export const TERM_OPTIONS: TermOption[] = [
 export interface AthleteEntry {
   studentName: string;
   rocketNumber: string;
-  sport: string;
   rocketError?: string;
 }
 
 export interface BulkSubmitPayload {
-  athletes: { studentName: string; rocketNumber: string; sport: string }[];
+  athletes: { studentName: string; rocketNumber: string }[];
   term: string;
+  coachName: string;
+  sport: string;
 }
 
 export interface ReportRow {

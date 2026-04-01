@@ -4,9 +4,10 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
   name TEXT NOT NULL,
-  role TEXT NOT NULL CHECK(role IN ('coach', 'sport_admin', 'cfo')),
+  role TEXT NOT NULL CHECK(role IN ('coach', 'sport_admin', 'cfo', 'super_admin')),
   sport_id TEXT REFERENCES sports_programs(id),
   must_change_password INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active',
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -38,7 +39,7 @@ CREATE TABLE IF NOT EXISTS insurance_requests (
   premium_cost REAL NOT NULL,
   status TEXT NOT NULL DEFAULT 'PENDING_SPORT_ADMIN',
   workflow_instance_id TEXT,
-  coach_email TEXT NOT NULL,
+  coach_email TEXT, -- nullable for anonymous coaches
   coach_name TEXT NOT NULL,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
