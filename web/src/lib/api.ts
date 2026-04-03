@@ -67,6 +67,20 @@ export function changePassword(currentPassword: string, newPassword: string) {
   });
 }
 
+export function forgotPassword(email: string) {
+  return request<{ message: string }>('/auth/forgot-password', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  });
+}
+
+export function resetPassword(token: string, newPassword: string) {
+  return request<{ ok: boolean }>('/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({ token, newPassword }),
+  });
+}
+
 // Sports
 export function listSports() {
   return request<SportProgram[]>('/api/sports');
@@ -109,6 +123,10 @@ export function voidRequest(id: string, reason: string) {
     method: 'POST',
     body: JSON.stringify({ reason }),
   });
+}
+
+export function deleteRequest(id: string) {
+  return request<void>(`/api/requests/${id}`, { method: 'DELETE' });
 }
 
 // Reports

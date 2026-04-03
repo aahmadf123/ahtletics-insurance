@@ -165,7 +165,6 @@ export async function buildInsuranceFormPdf(data: PdfFormData, logoPngBytes?: Ui
 
   // Row 1: Last Name, First Name, MI
   const half = USABLE / 2;
-  const third = USABLE / 3;
   y = drawFieldRow(page, helvetica, y, [
     { label: 'Last Name', value: lastName, width: half - 10 },
     { label: 'First Name', value: firstName, width: half - 10 },
@@ -173,18 +172,16 @@ export async function buildInsuranceFormPdf(data: PdfFormData, logoPngBytes?: Ui
   ]);
   y -= 6;
 
-  // Row 2: Rocket Number, DOB, Sport
+  // Row 2: Rocket Number, Sport
   y = drawFieldRow(page, helvetica, y, [
-    { label: 'UT Student ID (Rocket Number)', value: data.rocketNumber, width: third },
-    { label: 'Date of Birth (MM/DD/YYYY)', value: '', width: third },
-    { label: 'Sport', value: data.sport, width: third },
+    { label: 'UT Student ID (Rocket Number)', value: data.rocketNumber, width: half },
+    { label: 'Sport', value: data.sport, width: half },
   ]);
   y -= 6;
 
-  // Row 3: Coach Name, Sport (form-level fields for anonymous coach model)
+  // Row 3: Coach Name
   y = drawFieldRow(page, helvetica, y, [
     { label: 'Coach Name', value: data.coachName, width: half },
-    { label: 'Sport', value: data.sport, width: half },
   ]);
   y -= 12;
 

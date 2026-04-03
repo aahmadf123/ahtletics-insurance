@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../../lib/auth';
-import { getRequest, voidRequest, signRequest, getRequestPdfUrl } from '../../lib/api';
+import { getRequest, voidRequest, signRequest, getRequestPdfUrl, deleteRequest } from '../../lib/api';
 import { StatusBadge } from '../../components/StatusBadge';
 import type { RequestDetail } from '../../types';
 
@@ -17,6 +17,8 @@ export function RequestDetail() {
   const [showVoidForm, setShowVoidForm] = useState(false);
   const [showConfirmSign, setShowConfirmSign] = useState(false);
   const [showPdfPreview, setShowPdfPreview] = useState(false);
+  const [showConfirmDelete, setShowConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [signSuccess, setSignSuccess] = useState<{ name: string; timestamp: string } | null>(null);
   const [error, setError] = useState('');
 
@@ -61,6 +63,20 @@ export function RequestDetail() {
       setError(err instanceof Error ? err.message : 'Void failed');
     } finally {
       setVoiding(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!id) return;
+    setDeleting(true);
+    setError('');
+    try {
+      await deleteRequest(id);
+      navigate('/dashboard');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Delete failed');
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -271,6 +287,37 @@ export function RequestDetail() {
                 <button
                   className="btn btn-secondary"
                   onClick={() => { setShowVoidForm(false); setVoidReason(''); }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {user?.role === 'super_admin' && (
+        <div className="action-zone action-zone--danger" style={{ marginTop: '1rem' }}>
+          {!showConfirmDelete ? (
+            <button className="btn btn-danger" onClick={() => setShowConfirmDelete(true)}>
+              Permanently Delete Request
+            </button>
+          ) : (
+            <div>
+              <p style={{ marginBottom: '12px', fontWeight: 600 }}>
+                Are you sure? This will permanently delete this request and all its signatures.
+              </p>
+              <div style={{ display: 'flex', gap: '12px' }}>
+                <button
+                  className="btn btn-danger"
+                  onClick={handleDelete}
+                  disabled={deleting}
+                >
+                  {deleting ? 'Deleting…' : 'Confirm Delete'}
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => setShowConfirmDelete(false)}
                 >
                   Cancel
                 </button>
