@@ -132,9 +132,17 @@ export function Login() {
                 />
               </div>
               <p style={{ fontSize: '0.85rem', marginTop: '8px', color: '#666' }}>
-                Don't have an account?{' '}
-                <Link to="/register" style={{ color: '#1B2A4A', fontWeight: 600 }}>
-                  Request Access
+                {role !== 'super_admin' && (
+                  <>
+                    Don't have an account?{' '}
+                    <Link to="/register" style={{ color: '#1B2A4A', fontWeight: 600 }}>
+                      Request Access
+                    </Link>
+                    <br />
+                  </>
+                )}
+                <Link to="/forgot-password" style={{ color: '#1B2A4A', fontWeight: 600 }}>
+                  Forgot password?
                 </Link>
               </p>
             </div>
