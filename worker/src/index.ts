@@ -24,6 +24,17 @@ export interface Env {
   ASSETS: Fetcher;
 }
 
+const TOKEN_EXPIRATION_SECONDS = 60 * 60; // 1 hour
+
+const CREATE_RESET_TOKENS_TABLE = `
+  CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    token TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0
+  )
+`;
+
 const app = new Hono<{ Bindings: Env }>();
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
@@ -173,17 +184,10 @@ app.post('/auth/forgot-password', async c => {
   ).bind(email.toLowerCase().trim(), 'active').first<{ id: string; name: string }>();
 
   if (dbUser) {
-    await c.env.DB.prepare(`
-      CREATE TABLE IF NOT EXISTS password_reset_tokens (
-        token TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        expires_at INTEGER NOT NULL,
-        used INTEGER NOT NULL DEFAULT 0
-      )
-    `).run();
+    await c.env.DB.prepare(CREATE_RESET_TOKENS_TABLE).run();
 
     const token = newUUID();
-    const expiresAt = Math.floor(Date.now() / 1000) + 60 * 60; // 1 hour
+    const expiresAt = Math.floor(Date.now() / 1000) + TOKEN_EXPIRATION_SECONDS;
 
     await c.env.DB.prepare(
       'INSERT INTO password_reset_tokens (token, user_id, expires_at, used) VALUES (?, ?, ?, 0)'
@@ -217,14 +221,7 @@ app.post('/auth/reset-password', async c => {
   if (!token || !newPassword) return err('Missing required fields');
   if (newPassword.length < 8) return err('Password must be at least 8 characters');
 
-  await c.env.DB.prepare(`
-    CREATE TABLE IF NOT EXISTS password_reset_tokens (
-      token TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      expires_at INTEGER NOT NULL,
-      used INTEGER NOT NULL DEFAULT 0
-    )
-  `).run();
+  await c.env.DB.prepare(CREATE_RESET_TOKENS_TABLE).run();
 
   const resetToken = await c.env.DB.prepare(
     'SELECT user_id, expires_at, used FROM password_reset_tokens WHERE token = ?'
@@ -754,9 +751,11 @@ app.delete('/api/requests/:id', async c => {
   const req = await c.env.DB.prepare('SELECT id FROM insurance_requests WHERE id = ?').bind(id).first();
   if (!req) return err('Not found', 404);
 
-  await c.env.DB.prepare('DELETE FROM signatures WHERE request_id = ?').bind(id).run();
-  await c.env.DB.prepare('DELETE FROM audit_log WHERE request_id = ?').bind(id).run();
-  await c.env.DB.prepare('DELETE FROM insurance_requests WHERE id = ?').bind(id).run();
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM signatures WHERE request_id = ?').bind(id),
+    c.env.DB.prepare('DELETE FROM audit_log WHERE request_id = ?').bind(id),
+    c.env.DB.prepare('DELETE FROM insurance_requests WHERE id = ?').bind(id),
+  ]);
 
   return json({ ok: true });
 });
