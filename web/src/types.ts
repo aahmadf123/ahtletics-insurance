@@ -11,6 +11,7 @@ export interface User {
 }
 
 export type RequestStatus =
+  | 'PENDING_COACH'
   | 'PENDING_SPORT_ADMIN'
   | 'PENDING_CFO'
   | 'EXECUTED'
@@ -79,7 +80,6 @@ export interface AthleteEntry {
 export interface BulkSubmitPayload {
   athletes: { studentName: string; rocketNumber: string }[];
   term: string;
-  coachName: string;
   sport: string;
 }
 

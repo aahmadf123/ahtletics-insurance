@@ -6,7 +6,7 @@ import { StatusBadge } from '../components/StatusBadge';
 import type { InsuranceRequest, SportProgram, RequestStatus } from '../types';
 
 const ALL_STATUSES: RequestStatus[] = [
-  'PENDING_SPORT_ADMIN', 'PENDING_CFO', 'EXECUTED', 'VOIDED', 'EXPIRED',
+  'PENDING_COACH', 'PENDING_SPORT_ADMIN', 'PENDING_CFO', 'EXECUTED', 'VOIDED', 'EXPIRED',
 ];
 
 const TERM_LABELS = ['Fall', 'Spring/Summer', 'Summer'];
@@ -18,6 +18,9 @@ export function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
+
+  const [showBulkSignModal, setShowBulkSignModal] = useState(false);
+  const [coachNameInput, setCoachNameInput] = useState('');
 
   // Filters
   const [filterSport, setFilterSport] = useState('');
@@ -58,8 +61,9 @@ export function Dashboard() {
   const showCoachFilter = user?.role === 'cfo' || user?.role === 'super_admin';
 
   // Determine which rows are selectable for bulk sign
-  const canBulkSign = user?.role === 'sport_admin' || user?.role === 'cfo' || user?.role === 'super_admin';
+  const canBulkSign = user?.role === 'coach' || user?.role === 'sport_admin' || user?.role === 'cfo' || user?.role === 'super_admin';
   const getSelectableStatus = (): string | null => {
+    if (user?.role === 'coach') return 'PENDING_COACH';
     if (user?.role === 'sport_admin') return 'PENDING_SPORT_ADMIN';
     if (user?.role === 'cfo') return 'PENDING_CFO';
     if (user?.role === 'super_admin') return null; // can sign any pending
@@ -95,11 +99,22 @@ export function Dashboard() {
 
   const handleBulkSign = async () => {
     if (selectedIds.size === 0) return;
+    if (user?.role === 'coach') {
+      if (!showBulkSignModal) {
+        setShowBulkSignModal(true);
+        return;
+      }
+      if (!coachNameInput.trim()) {
+        setError('Please enter your full name to sign.');
+        return;
+      }
+    }
     setBulkSigning(true);
     setError('');
     try {
-      const result = await bulkSignRequests([...selectedIds]);
+      const result = await bulkSignRequests([...selectedIds], user?.role === 'coach' ? coachNameInput.trim() : undefined);
       setSelectedIds(new Set());
+      setShowBulkSignModal(false);
       setSuccessMsg(`Successfully approved ${result.signed} request${result.signed !== 1 ? 's' : ''}.`);
       setTimeout(() => setSuccessMsg(''), 5000);
       fetchRequests();
@@ -265,6 +280,46 @@ export function Dashboard() {
             >
               Clear Selection
             </button>
+          </div>
+        </div>
+      )}
+
+      {showBulkSignModal && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center',
+          justifyContent: 'center', zIndex: 2000,
+        }}>
+          <div className="form-card" style={{ maxWidth: '480px', margin: '0 auto', width: '100%' }}>
+            <h2>Confirm Bulk Signature</h2>
+            <p>You are about to digitally sign <strong>{selectedIds.size} request{selectedIds.size !== 1 ? 's' : ''}</strong>.</p>
+            {error && <p className="error" style={{ marginTop: '12px' }}>{error}</p>}
+            <div className="field" style={{ marginTop: '16px' }}>
+              <label>Please enter your full name to sign as Coach:</label>
+              <input
+                type="text"
+                value={coachNameInput}
+                onChange={e => setCoachNameInput(e.target.value)}
+                placeholder="Your full name"
+                maxLength={200}
+                autoFocus
+              />
+            </div>
+            <div style={{ display: 'flex', gap: '12px', marginTop: '16px' }}>
+              <button
+                className="btn btn-primary"
+                onClick={handleBulkSign}
+                disabled={bulkSigning}
+              >
+                {bulkSigning ? 'Approving…' : 'Confirm & Sign All'}
+              </button>
+              <button
+                className="btn btn-secondary"
+                onClick={() => { setShowBulkSignModal(false); setError(''); }}
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}

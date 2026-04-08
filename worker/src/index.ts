@@ -388,12 +388,10 @@ app.post('/api/requests', async c => {
   const body = await c.req.json<{
     athletes: { studentName: string; rocketNumber: string }[];
     term: string;
-    coachName: string;
     sport: string;
   }>();
 
   if (!body.athletes?.length || !body.term) return err('Missing athletes or term');
-  if (!body.coachName?.trim()) return err('Coach name is required');
   if (!body.sport) return err('Sport is required');
 
   if (!isBeforeDeadline(body.term)) {
@@ -403,7 +401,6 @@ app.post('/api/requests', async c => {
   const premiumCost = getPremiumForTerm(body.term);
   if (!premiumCost) return err('Unknown term', 400);
 
-  const coachName = body.coachName.trim();
   const sport = body.sport;
   const created = [];
 
@@ -422,8 +419,7 @@ app.post('/api/requests', async c => {
 
     const id = newUUID();
     const ip = c.req.header('CF-Connecting-IP') ?? c.req.header('X-Forwarded-For') ?? 'unknown';
-    const isSoftball = sport === 'womens_softball';
-    const initialStatus = isSoftball ? 'PENDING_CFO' : 'PENDING_SPORT_ADMIN';
+    const initialStatus = 'PENDING_COACH';
 
     await c.env.DB.prepare(`
       INSERT INTO insurance_requests
@@ -431,50 +427,16 @@ app.post('/api/requests', async c => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       id, athlete.studentName.trim(), athlete.rocketNumber, sport,
-      body.term, premiumCost, initialStatus, null, coachName
+      body.term, premiumCost, initialStatus, null, ''
     ).run();
-
-    // Coach signature
-    await c.env.DB.prepare(`
-      INSERT INTO signatures (id, request_id, signatory_role, signatory_email, signatory_name, ip_address)
-      VALUES (?, ?, 'COACH', ?, ?, ?)
-    `).bind(newUUID(), id, '', coachName, ip).run();
 
     // Audit log
     await c.env.DB.prepare(`
       INSERT INTO audit_log (id, request_id, action, performed_by, details)
       VALUES (?, ?, 'SUBMITTED', ?, ?)
-    `).bind(newUUID(), id, coachName, JSON.stringify({ status: initialStatus })).run();
+    `).bind(newUUID(), id, user.name ?? 'Coach', JSON.stringify({ status: initialStatus })).run();
 
-    // Get sport admin for notification
-    const sportRow = await c.env.DB.prepare(`
-      SELECT sp.name as sportName, sa.email as adminEmail, sa.name as adminName
-      FROM sports_programs sp
-      LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
-      WHERE sp.id = ?
-    `).bind(sport).first<{ sportName: string; adminEmail: string | null; adminName: string | null }>();
-
-    const emailData = {
-      studentName: athlete.studentName.trim(),
-      rocketNumber: athlete.rocketNumber,
-      sport,
-      sportName: sportRow?.sportName ?? sport,
-      term: body.term,
-      premiumCost,
-      coachName,
-      coachEmail: '',
-      requestId: id,
-      status: initialStatus,
-    };
-
-    // Email notifications
-    if (isSoftball) {
-      await notifyPendingCFO(c.env, emailData);
-    } else if (sportRow?.adminEmail) {
-      await notifyPendingSportAdmin(c.env, emailData, sportRow.adminEmail);
-    }
-
-    created.push({ id, studentName: athlete.studentName.trim(), rocketNumber: athlete.rocketNumber, sport, term: body.term, premiumCost, status: initialStatus, coachEmail: null, coachName });
+    created.push({ id, studentName: athlete.studentName.trim(), rocketNumber: athlete.rocketNumber, sport, term: body.term, premiumCost, status: initialStatus, coachEmail: null, coachName: '' });
   }
 
   return json(created, 201);
@@ -516,11 +478,12 @@ app.get('/api/requests/:id', async c => {
 app.post('/api/requests/:id/sign', async c => {
   const user = await getUser(c.req.raw, c.env.JWT_SECRET);
   if (!user) return err('Unauthorized', 401);
-  if (user.role !== 'sport_admin' && user.role !== 'cfo' && user.role !== 'super_admin') {
-    return err('Only sport admins, CFO, and super admins can sign in-app', 403);
+  if (user.role !== 'coach' && user.role !== 'sport_admin' && user.role !== 'cfo' && user.role !== 'super_admin') {
+    return err('Only authorized roles can sign in-app', 403);
   }
 
   const { id } = c.req.param();
+  const { coachName } = await c.req.json<{ coachName?: string }>().catch(() => ({ coachName: undefined }));
   const ip = c.req.header('cf-connecting-ip') ?? c.req.header('x-forwarded-for') ?? 'unknown';
 
   const req = await c.env.DB.prepare(`
@@ -536,23 +499,29 @@ app.post('/api/requests/:id/sign', async c => {
   if (!req) return err('Not found', 404);
 
   // Determine expected signer role
-  // Super admin can sign as either SPORT_ADMIN or CFO depending on current status
   let sigRole: string;
   if (user.role === 'super_admin') {
     if (req.status === 'PENDING_SPORT_ADMIN') sigRole = 'SPORT_ADMIN';
     else if (req.status === 'PENDING_CFO') sigRole = 'CFO';
     else return err('This request is not awaiting any approval', 409);
+  } else if (user.role === 'coach') {
+    sigRole = 'COACH';
   } else {
     sigRole = user.role === 'cfo' ? 'CFO' : 'SPORT_ADMIN';
   }
 
   // Validate status matches the expected signer
+  if (sigRole === 'COACH' && req.status !== 'PENDING_COACH') {
+    return err('This request is not awaiting coach signature', 409);
+  }
   if (sigRole === 'SPORT_ADMIN' && req.status !== 'PENDING_SPORT_ADMIN') {
     return err('This request is not awaiting sport admin approval', 409);
   }
   if (sigRole === 'CFO' && req.status !== 'PENDING_CFO') {
     return err('This request is not awaiting CFO approval', 409);
   }
+
+  const signatoryName = sigRole === 'COACH' ? (coachName?.trim() || 'Unknown Coach') : user.name;
 
   // Check for duplicate signature
   const existing = await c.env.DB.prepare(
@@ -564,16 +533,53 @@ app.post('/api/requests/:id/sign', async c => {
   await c.env.DB.prepare(`
     INSERT INTO signatures (id, request_id, signatory_role, signatory_email, signatory_name, ip_address)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).bind(newUUID(), id, sigRole, user.email, user.name, ip).run();
+  `).bind(newUUID(), id, sigRole, user.email || '', signatoryName, ip).run();
 
   await c.env.DB.prepare(`
     INSERT INTO audit_log (id, request_id, action, performed_by, details)
     VALUES (?, ?, 'SIGNED', ?, ?)
-  `).bind(newUUID(), id, user.email, JSON.stringify({ role: sigRole })).run();
+  `).bind(newUUID(), id, user.email || signatoryName, JSON.stringify({ role: sigRole })).run();
 
   // Advance status
   let newStatus: string;
-  if (sigRole === 'SPORT_ADMIN') {
+  if (sigRole === 'COACH') {
+    const isSoftball = req.sport === 'womens_softball';
+    newStatus = isSoftball ? 'PENDING_CFO' : 'PENDING_SPORT_ADMIN';
+    
+    await c.env.DB.prepare('UPDATE insurance_requests SET status = ?, coach_name = ? WHERE id = ?')
+      .bind(newStatus, signatoryName, id).run();
+
+    // Fetch details for email
+    const emailReq = await c.env.DB.prepare(`
+      SELECT ir.student_name, ir.rocket_number, ir.sport, sp.name as sportName,
+             ir.term, ir.premium_cost, ir.coach_name, ir.coach_email,
+             sa.email as sportAdminEmail
+      FROM insurance_requests ir
+      LEFT JOIN sports_programs sp ON ir.sport = sp.id
+      LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
+      WHERE ir.id = ?
+    `).bind(id).first<Record<string, unknown>>();
+
+    if (emailReq) {
+      const emailData = {
+        studentName: emailReq.student_name as string,
+        rocketNumber: emailReq.rocket_number as string,
+        sport: emailReq.sport as string,
+        sportName: (emailReq.sportName as string) ?? (emailReq.sport as string),
+        term: emailReq.term as string,
+        premiumCost: emailReq.premium_cost as number,
+        coachName: emailReq.coach_name as string,
+        coachEmail: (emailReq.coach_email as string) || '',
+        requestId: id,
+        status: newStatus,
+      };
+      if (isSoftball) {
+        await notifyPendingCFO(c.env, emailData);
+      } else if (emailReq.sportAdminEmail) {
+        await notifyPendingSportAdmin(c.env, emailData, emailReq.sportAdminEmail as string);
+      }
+    }
+  } else if (sigRole === 'SPORT_ADMIN') {
     newStatus = 'PENDING_CFO';
     await c.env.DB.prepare('UPDATE insurance_requests SET status = ? WHERE id = ?')
       .bind(newStatus, id).run();
@@ -922,11 +928,11 @@ app.put('/api/admin/users/:id/reject', async c => {
 app.post('/api/requests/bulk-sign', async c => {
   const user = await getUser(c.req.raw, c.env.JWT_SECRET);
   if (!user) return err('Unauthorized', 401);
-  if (user.role !== 'sport_admin' && user.role !== 'cfo' && user.role !== 'super_admin') {
-    return err('Only sport admins, CFO, and super admins can bulk sign', 403);
+  if (user.role !== 'coach' && user.role !== 'sport_admin' && user.role !== 'cfo' && user.role !== 'super_admin') {
+    return err('Only authorized roles can bulk sign', 403);
   }
 
-  const { ids } = await c.req.json<{ ids: string[] }>();
+  const { ids, coachName } = await c.req.json<{ ids: string[]; coachName?: string }>();
   if (!ids?.length) return err('No request IDs provided');
 
   const ip = c.req.header('cf-connecting-ip') ?? c.req.header('x-forwarded-for') ?? 'unknown';
@@ -946,12 +952,17 @@ app.post('/api/requests/bulk-sign', async c => {
       if (req.status === 'PENDING_SPORT_ADMIN') sigRole = 'SPORT_ADMIN';
       else if (req.status === 'PENDING_CFO') sigRole = 'CFO';
       else continue;
+    } else if (user.role === 'coach') {
+      sigRole = 'COACH';
     } else {
       sigRole = user.role === 'cfo' ? 'CFO' : 'SPORT_ADMIN';
     }
 
+    if (sigRole === 'COACH' && req.status !== 'PENDING_COACH') continue;
     if (sigRole === 'SPORT_ADMIN' && req.status !== 'PENDING_SPORT_ADMIN') continue;
     if (sigRole === 'CFO' && req.status !== 'PENDING_CFO') continue;
+
+    const signatoryName = sigRole === 'COACH' ? (coachName?.trim() || 'Unknown Coach') : user.name;
 
     const existing = await c.env.DB.prepare(
       'SELECT id FROM signatures WHERE request_id = ? AND signatory_role = ?'
@@ -961,21 +972,58 @@ app.post('/api/requests/bulk-sign', async c => {
     await c.env.DB.prepare(`
       INSERT INTO signatures (id, request_id, signatory_role, signatory_email, signatory_name, ip_address)
       VALUES (?, ?, ?, ?, ?, ?)
-    `).bind(newUUID(), id, sigRole, user.email, user.name, ip).run();
+    `).bind(newUUID(), id, sigRole, user.email || '', signatoryName, ip).run();
 
     await c.env.DB.prepare(`
       INSERT INTO audit_log (id, request_id, action, performed_by, details)
       VALUES (?, ?, 'SIGNED', ?, ?)
-    `).bind(newUUID(), id, user.email, JSON.stringify({ role: sigRole, bulk: true })).run();
+    `).bind(newUUID(), id, user.email || signatoryName, JSON.stringify({ role: sigRole, bulk: true })).run();
 
     let newStatus: string;
-    if (sigRole === 'SPORT_ADMIN') {
+    if (sigRole === 'COACH') {
+      const isSoftball = req.sport === 'womens_softball';
+      newStatus = isSoftball ? 'PENDING_CFO' : 'PENDING_SPORT_ADMIN';
+      await c.env.DB.prepare('UPDATE insurance_requests SET status = ?, coach_name = ? WHERE id = ?')
+        .bind(newStatus, signatoryName, id).run();
+
+      // Email notifications for new requests
+      const emailReq = await c.env.DB.prepare(`
+        SELECT ir.student_name, ir.rocket_number, ir.sport, sp.name as sportName,
+               ir.term, ir.premium_cost, ir.coach_name, ir.coach_email, sa.email as sportAdminEmail
+        FROM insurance_requests ir
+        LEFT JOIN sports_programs sp ON ir.sport = sp.id
+        LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
+        WHERE ir.id = ?
+      `).bind(id).first<Record<string, unknown>>();
+
+      if (emailReq) {
+        const emailData = {
+          studentName: emailReq.student_name as string,
+          rocketNumber: emailReq.rocket_number as string,
+          sport: emailReq.sport as string,
+          sportName: (emailReq.sportName as string) ?? (emailReq.sport as string),
+          term: emailReq.term as string,
+          premiumCost: emailReq.premium_cost as number,
+          coachName: emailReq.coach_name as string,
+          coachEmail: (emailReq.coach_email as string) || '',
+          requestId: id,
+          status: newStatus,
+        };
+        if (isSoftball) {
+          await notifyPendingCFO(c.env, emailData);
+        } else if (emailReq.sportAdminEmail) {
+          await notifyPendingSportAdmin(c.env, emailData, emailReq.sportAdminEmail as string);
+        }
+      }
+    } else if (sigRole === 'SPORT_ADMIN') {
       newStatus = 'PENDING_CFO';
+      await c.env.DB.prepare('UPDATE insurance_requests SET status = ? WHERE id = ?')
+        .bind(newStatus, id).run();
     } else {
       newStatus = 'EXECUTED';
+      await c.env.DB.prepare('UPDATE insurance_requests SET status = ? WHERE id = ?')
+        .bind(newStatus, id).run();
     }
-    await c.env.DB.prepare('UPDATE insurance_requests SET status = ? WHERE id = ?')
-      .bind(newStatus, id).run();
 
     results.push({ id, status: newStatus });
   }

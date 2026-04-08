@@ -32,7 +32,6 @@ export function NewRequest() {
 
   const [sports, setSports] = useState<SportProgram[]>([]);
   const [term, setTerm] = useState('');
-  const [coachName, setCoachName] = useState('');
   const [sport, setSport] = useState('');
   const [athletes, setAthletes] = useState<AthleteEntry[]>([emptyAthlete()]);
   const [allAcknowledged, setAllAcknowledged] = useState(false);
@@ -70,7 +69,7 @@ export function NewRequest() {
   const athletesValid = athletes.every(
     a => a.firstName.trim() && a.lastName.trim() && /^R\d{8}$/.test(a.rocketNumber) && !a.rocketError
   );
-  const canSubmit = term && coachName.trim() && sport && athletesValid && allAcknowledged;
+  const canSubmit = term && sport && athletesValid && allAcknowledged;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -84,7 +83,6 @@ export function NewRequest() {
           rocketNumber: a.rocketNumber,
         })),
         term,
-        coachName: coachName.trim(),
         sport,
       });
       if (results.length === 1) {
@@ -103,26 +101,14 @@ export function NewRequest() {
     <div className="page">
       <h1>New Insurance Request</h1>
       <p className="page-subtitle">
-        Complete all fields below. Your signature is recorded automatically on submission.
+        Complete all fields below. After submission, you will be prompted to sign the request(s).
         The request will then be routed to the Sport Administrator and CFO for approval.
       </p>
 
       <form className="form-card" onSubmit={handleSubmit}>
-        {/* Coach Information */}
         <fieldset className="fieldset">
-          <legend>Coach Information</legend>
+          <legend>Program Information</legend>
           <div className="athlete-row-fields">
-            <div className="field">
-              <label>Coach Name *</label>
-              <input
-                type="text"
-                value={coachName}
-                onChange={e => setCoachName(e.target.value)}
-                placeholder="Your full name"
-                required
-                maxLength={200}
-              />
-            </div>
             <div className="field">
               <label>Sport *</label>
               <select

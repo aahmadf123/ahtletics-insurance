@@ -21,6 +21,7 @@ export function RequestDetail() {
   const [deleting, setDeleting] = useState(false);
   const [signSuccess, setSignSuccess] = useState<{ name: string; timestamp: string } | null>(null);
   const [error, setError] = useState('');
+  const [coachNameInput, setCoachNameInput] = useState('');
 
   const loadRequest = () => {
     if (!id) return;
@@ -35,13 +36,17 @@ export function RequestDetail() {
 
   const handleSign = async () => {
     if (!id) return;
+    if (user?.role === 'coach' && !coachNameInput.trim()) {
+      setError('Please enter your full name to sign.');
+      return;
+    }
     setSigning(true);
     setError('');
     try {
-      await signRequest(id);
+      await signRequest(id, user?.role === 'coach' ? coachNameInput.trim() : undefined);
       setShowConfirmSign(false);
       setSignSuccess({
-        name: user?.name ?? 'Unknown',
+        name: user?.role === 'coach' ? coachNameInput.trim() : (user?.name ?? 'Unknown'),
         timestamp: new Date().toLocaleString(),
       });
       loadRequest();
@@ -84,6 +89,7 @@ export function RequestDetail() {
   if (!req) return <div className="page"><p className="error">{error || 'Request not found.'}</p></div>;
 
   const canSign =
+    (user?.role === 'coach' && req.status === 'PENDING_COACH') ||
     (user?.role === 'sport_admin' && req.status === 'PENDING_SPORT_ADMIN') ||
     (user?.role === 'cfo' && req.status === 'PENDING_CFO') ||
     (user?.role === 'super_admin' && (req.status === 'PENDING_SPORT_ADMIN' || req.status === 'PENDING_CFO'));
@@ -241,6 +247,19 @@ export function RequestDetail() {
               You are about to digitally sign this insurance request for <strong>{req.studentName}</strong>.
               This action cannot be undone.
             </p>
+            {error && <p className="error" style={{ marginTop: '12px' }}>{error}</p>}
+            {user?.role === 'coach' && (
+              <div className="field" style={{ marginTop: '16px' }}>
+                <label>Please enter your full name to sign as Coach:</label>
+                <input
+                  type="text"
+                  value={coachNameInput}
+                  onChange={e => setCoachNameInput(e.target.value)}
+                  placeholder="Your full name"
+                  maxLength={200}
+                />
+              </div>
+            )}
             <div style={{ display: 'flex', gap: '12px', marginTop: '16px' }}>
               <button
                 className="btn btn-primary"
@@ -251,7 +270,7 @@ export function RequestDetail() {
               </button>
               <button
                 className="btn btn-secondary"
-                onClick={() => setShowConfirmSign(false)}
+                onClick={() => { setShowConfirmSign(false); setError(''); }}
               >
                 Cancel
               </button>

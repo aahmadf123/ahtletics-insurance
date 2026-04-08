@@ -103,14 +103,17 @@ export function submitRequest(payload: BulkSubmitPayload) {
   });
 }
 
-export function signRequest(id: string) {
-  return request<{ id: string; status: string }>(`/api/requests/${id}/sign`, { method: 'POST' });
+export function signRequest(id: string, coachName?: string) {
+  return request<{ id: string; status: string }>(`/api/requests/${id}/sign`, {
+    method: 'POST',
+    body: JSON.stringify(coachName ? { coachName } : {}),
+  });
 }
 
-export function bulkSignRequests(ids: string[]) {
+export function bulkSignRequests(ids: string[], coachName?: string) {
   return request<{ signed: number; results: { id: string; status: string }[] }>('/api/requests/bulk-sign', {
     method: 'POST',
-    body: JSON.stringify({ ids }),
+    body: JSON.stringify({ ids, coachName }),
   });
 }
 
