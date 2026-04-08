@@ -24,6 +24,17 @@ export interface Env {
   ASSETS: Fetcher;
 }
 
+const TOKEN_EXPIRATION_SECONDS = 60 * 60; // 1 hour
+
+const CREATE_RESET_TOKENS_TABLE = `
+  CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    token TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0
+  )
+`;
+
 const app = new Hono<{ Bindings: Env }>();
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
@@ -160,6 +171,75 @@ app.put('/auth/password', async c => {
   await c.env.DB.prepare(
     'UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?'
   ).bind(newHash, user.sub).run();
+  return json({ ok: true });
+});
+
+// POST /auth/forgot-password — send a password reset email
+app.post('/auth/forgot-password', async c => {
+  const { email } = await c.req.json<{ email: string }>();
+  if (!email?.trim()) return err('Email is required');
+
+  const dbUser = await c.env.DB.prepare(
+    'SELECT id, name FROM users WHERE email = ? AND status = ?'
+  ).bind(email.toLowerCase().trim(), 'active').first<{ id: string; name: string }>();
+
+  if (dbUser) {
+    await c.env.DB.prepare(CREATE_RESET_TOKENS_TABLE).run();
+
+    const token = newUUID();
+    const expiresAt = Math.floor(Date.now() / 1000) + TOKEN_EXPIRATION_SECONDS;
+
+    await c.env.DB.prepare(
+      'INSERT INTO password_reset_tokens (token, user_id, expires_at, used) VALUES (?, ?, ?, 0)'
+    ).bind(token, dbUser.id, expiresAt).run();
+
+    const resetUrl = `${c.env.APP_BASE_URL}/reset-password?token=${token}`;
+
+    if (c.env.RESEND_API_KEY) {
+      await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${c.env.RESEND_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: c.env.FROM_EMAIL,
+          to: email.toLowerCase().trim(),
+          subject: 'Athletics Insurance Portal — Password Reset',
+          html: `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px"><h2 style="color:#003DA5">Password Reset Request</h2><p>Hi ${dbUser.name},</p><p>We received a request to reset your password for the University of Toledo Athletics Insurance Portal.</p><p><a href="${resetUrl}" style="background:#003DA5;color:white;padding:10px 20px;border-radius:6px;text-decoration:none;display:inline-block;margin:12px 0">Reset My Password</a></p><p style="color:#666;font-size:14px">This link will expire in 1 hour. If you did not request a password reset, please ignore this email.</p><hr style="margin-top:30px;border:none;border-top:1px solid #eee"/><p style="color:#888;font-size:12px">University of Toledo Athletics — Health Insurance Request System</p></div>`,
+        }),
+      }).catch(() => {/* ignore email send errors */});
+    }
+  }
+
+  return json({ message: 'If an account with that email exists, a reset link has been sent.' });
+});
+
+// POST /auth/reset-password — reset password with token
+app.post('/auth/reset-password', async c => {
+  const { token, newPassword } = await c.req.json<{ token: string; newPassword: string }>();
+  if (!token || !newPassword) return err('Missing required fields');
+  if (newPassword.length < 8) return err('Password must be at least 8 characters');
+
+  await c.env.DB.prepare(CREATE_RESET_TOKENS_TABLE).run();
+
+  const resetToken = await c.env.DB.prepare(
+    'SELECT user_id, expires_at, used FROM password_reset_tokens WHERE token = ?'
+  ).bind(token).first<{ user_id: string; expires_at: number; used: number }>();
+
+  if (!resetToken) return err('Invalid or expired reset link', 400);
+  if (resetToken.used) return err('This reset link has already been used', 400);
+  if (Math.floor(Date.now() / 1000) > resetToken.expires_at) return err('This reset link has expired', 400);
+
+  const newHash = await hashPassword(newPassword);
+  await c.env.DB.prepare(
+    'UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?'
+  ).bind(newHash, resetToken.user_id).run();
+
+  await c.env.DB.prepare(
+    'UPDATE password_reset_tokens SET used = 1 WHERE token = ?'
+  ).bind(token).run();
+
   return json({ ok: true });
 });
 
@@ -605,7 +685,7 @@ app.get('/api/requests/:id/pdf', async c => {
   return new Response(pdfBytes, {
     headers: {
       'Content-Type': 'application/pdf',
-      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Content-Disposition': `inline; filename="${filename}"`,
     },
   });
 });
@@ -658,6 +738,26 @@ app.post('/api/requests/:id/void', async c => {
   await notifyVoided(c.env, emailData, req.sportAdminEmail as string ?? undefined);
 
   return json({ id, status: 'VOIDED' });
+});
+
+// DELETE /api/requests/:id — super_admin only (permanent delete)
+app.delete('/api/requests/:id', async c => {
+  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  if (!user) return err('Unauthorized', 401);
+  if (user.role !== 'super_admin') return err('Only Super Admin can delete requests', 403);
+
+  const { id } = c.req.param();
+
+  const req = await c.env.DB.prepare('SELECT id FROM insurance_requests WHERE id = ?').bind(id).first();
+  if (!req) return err('Not found', 404);
+
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM signatures WHERE request_id = ?').bind(id),
+    c.env.DB.prepare('DELETE FROM audit_log WHERE request_id = ?').bind(id),
+    c.env.DB.prepare('DELETE FROM insurance_requests WHERE id = ?').bind(id),
+  ]);
+
+  return json({ ok: true });
 });
 
 // ── Reports (CFO and super_admin) ────────────────────────────────────────────

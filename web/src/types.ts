@@ -70,7 +70,8 @@ export const TERM_OPTIONS: TermOption[] = [
 ];
 
 export interface AthleteEntry {
-  studentName: string;
+  firstName: string;
+  lastName: string;
   rocketNumber: string;
   rocketError?: string;
 }

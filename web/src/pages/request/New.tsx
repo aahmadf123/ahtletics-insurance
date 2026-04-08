@@ -18,7 +18,7 @@ const TERMS = TERM_OPTIONS.map(t => ({
 }));
 
 function emptyAthlete(): AthleteEntry {
-  return { studentName: '', rocketNumber: '' };
+  return { firstName: '', lastName: '', rocketNumber: '' };
 }
 
 function validateRocket(val: string): string {
@@ -68,7 +68,7 @@ export function NewRequest() {
   };
 
   const athletesValid = athletes.every(
-    a => a.studentName.trim() && /^R\d{8}$/.test(a.rocketNumber) && !a.rocketError
+    a => a.firstName.trim() && a.lastName.trim() && /^R\d{8}$/.test(a.rocketNumber) && !a.rocketError
   );
   const canSubmit = term && coachName.trim() && sport && athletesValid && allAcknowledged;
 
@@ -80,7 +80,7 @@ export function NewRequest() {
     try {
       const results = await submitRequest({
         athletes: athletes.map(a => ({
-          studentName: a.studentName.trim(),
+          studentName: `${a.firstName.trim()} ${a.lastName.trim()}`,
           rocketNumber: a.rocketNumber,
         })),
         term,
@@ -178,14 +178,26 @@ export function NewRequest() {
 
               <div className="athlete-row-fields">
                 <div className="field">
-                  <label>Full Name *</label>
+                  <label>First Name *</label>
                   <input
                     type="text"
-                    value={athlete.studentName}
-                    onChange={e => updateAthlete(index, 'studentName', e.target.value)}
-                    placeholder="First Last"
+                    value={athlete.firstName}
+                    onChange={e => updateAthlete(index, 'firstName', e.target.value)}
+                    placeholder="First name"
                     required
-                    maxLength={200}
+                    maxLength={100}
+                  />
+                </div>
+
+                <div className="field">
+                  <label>Last Name *</label>
+                  <input
+                    type="text"
+                    value={athlete.lastName}
+                    onChange={e => updateAthlete(index, 'lastName', e.target.value)}
+                    placeholder="Last name"
+                    required
+                    maxLength={100}
                   />
                 </div>
 

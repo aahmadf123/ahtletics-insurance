@@ -6,6 +6,8 @@ import type { User } from './types';
 
 import { Login } from './pages/Login';
 import { Register } from './pages/Register';
+import { ForgotPassword } from './pages/ForgotPassword';
+import { ResetPassword } from './pages/ResetPassword';
 import { Dashboard } from './pages/Dashboard';
 import { NewRequest } from './pages/request/New';
 import { RequestDetail } from './pages/request/Detail';
@@ -78,6 +80,8 @@ function AppLayout() {
         <Routes>
           <Route path="/login" element={user ? <Navigate to="/dashboard" replace /> : <Login />} />
           <Route path="/register" element={user ? <Navigate to="/dashboard" replace /> : <Register />} />
+          <Route path="/forgot-password" element={user ? <Navigate to="/dashboard" replace /> : <ForgotPassword />} />
+          <Route path="/reset-password" element={user ? <Navigate to="/dashboard" replace /> : <ResetPassword />} />
           <Route path="/dashboard" element={
             !user ? <Navigate to="/login" replace /> : <Dashboard />
           } />
