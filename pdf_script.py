@@ -245,7 +245,7 @@ def build(submission_deadline: str = "September 8, 2026"):
         [Paragraph("University of Toledo",  S_ADDR)],
         [Paragraph("2801 W. Bancroft St.",   S_ADDR)],
         [Paragraph("Toledo, OH  43606",      S_ADDR)],
-        [Paragraph("utoledo.edu/athletics",  S_ADDR)],
+        [Paragraph("utrockets.com",  S_ADDR)],
     ], colWidths=[1.4 * inch])
     addr_col.setStyle(TableStyle([
         ("LEFTPADDING",   (0, 0), (-1, -1), 0),
@@ -363,7 +363,7 @@ def build(submission_deadline: str = "September 8, 2026"):
 
     footer = Table([[
         Paragraph(
-            "University of Toledo Athletics  ·  Health &amp; Insurance Services  ·  "
+            "University of Toledo Athletics  ·  "
             "Glass Bowl, 2801 W. Bancroft St., Toledo OH 43606  ·  "
             "athletics-insurance@utoledo.edu",
             ParagraphStyle("fl", fontName="Helvetica", fontSize=6,
