@@ -2,10 +2,11 @@ import { useEffect, useState } from 'react';
 import { useAuth } from '../lib/auth';
 import { getReports, getReportsCsvUrl, listSports } from '../lib/api';
 import { StatusBadge } from '../components/StatusBadge';
+import { summarizeBySport, exportReportXlsx } from '../lib/analytics';
 import type { ReportRow, SportProgram, RequestStatus } from '../types';
 
 const ALL_STATUSES: RequestStatus[] = [
-  'PENDING_SPORT_ADMIN', 'PENDING_CFO', 'EXECUTED', 'VOIDED', 'EXPIRED',
+  'PENDING_COACH', 'PENDING_APPROVAL', 'EXECUTED', 'VOIDED', 'EXPIRED',
 ];
 
 export function Reports() {
@@ -44,12 +45,14 @@ export function Reports() {
   }
 
   const totalPremium = rows
-    .filter(r => r.status === 'EXECUTED' || r.status === 'PENDING_CFO' || r.status === 'PENDING_SPORT_ADMIN')
+    .filter(r => r.status === 'EXECUTED' || r.status === 'PENDING_APPROVAL')
     .reduce((sum, r) => sum + r.premiumCost, 0);
 
   const executedPremium = rows
     .filter(r => r.status === 'EXECUTED')
     .reduce((sum, r) => sum + r.premiumCost, 0);
+
+  const bySport = summarizeBySport(rows);
 
   const csvParams: Record<string, string> = {};
   if (filterSport) csvParams.sport = filterSport;
@@ -61,13 +64,23 @@ export function Reports() {
     <div className="page">
       <div className="page-header">
         <h1>Financial Reports</h1>
-        <a
-          href={getReportsCsvUrl(csvParams)}
-          className="btn btn-secondary"
-          download="athletics-insurance-report.csv"
-        >
-          Export CSV
-        </a>
+        <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => exportReportXlsx(rows)}
+            disabled={rows.length === 0}
+          >
+            Export Excel
+          </button>
+          <a
+            href={getReportsCsvUrl(csvParams)}
+            className="btn btn-secondary"
+            download="athletics-insurance-report.csv"
+          >
+            Export CSV
+          </a>
+        </div>
       </div>
 
       {/* Summary cards */}
@@ -91,6 +104,46 @@ export function Reports() {
           </span>
         </div>
       </div>
+
+      {/* Totals by sport */}
+      {bySport.length > 0 && (
+        <div className="form-card">
+          <h2>Totals by Sport</h2>
+          <div className="table-wrapper">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Sport</th>
+                  <th>Requests</th>
+                  <th>Committed Premium</th>
+                  <th>Executed Premium</th>
+                  <th>Executed Requests</th>
+                </tr>
+              </thead>
+              <tbody>
+                {bySport.map(s => (
+                  <tr key={s.sportName}>
+                    <td>{s.sportName}</td>
+                    <td>{s.count}</td>
+                    <td>${s.committedPremium.toFixed(2)}</td>
+                    <td className="executed">${s.executedPremium.toFixed(2)}</td>
+                    <td>{s.executedCount}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr style={{ fontWeight: 700 }}>
+                  <td>Total</td>
+                  <td>{bySport.reduce((n, s) => n + s.count, 0)}</td>
+                  <td>${bySport.reduce((n, s) => n + s.committedPremium, 0).toFixed(2)}</td>
+                  <td className="executed">${bySport.reduce((n, s) => n + s.executedPremium, 0).toFixed(2)}</td>
+                  <td>{bySport.reduce((n, s) => n + s.executedCount, 0)}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Filters */}
       <div className="filters form-card">

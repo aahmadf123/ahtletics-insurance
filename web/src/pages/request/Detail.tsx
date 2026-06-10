@@ -3,6 +3,7 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../../lib/auth';
 import { getRequest, voidRequest, signRequest, getRequestPdfUrl, deleteRequest } from '../../lib/api';
 import { StatusBadge } from '../../components/StatusBadge';
+import { fundingSourceLabel } from '../../types';
 import type { RequestDetail } from '../../types';
 
 export function RequestDetail() {
@@ -19,7 +20,6 @@ export function RequestDetail() {
   const [showPdfPreview, setShowPdfPreview] = useState(false);
   const [showConfirmDelete, setShowConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [signSuccess, setSignSuccess] = useState<{ name: string; timestamp: string } | null>(null);
   const [error, setError] = useState('');
   const [coachNameInput, setCoachNameInput] = useState('');
 
@@ -45,14 +45,10 @@ export function RequestDetail() {
     try {
       await signRequest(id, user?.role === 'coach' ? coachNameInput.trim() : undefined);
       setShowConfirmSign(false);
-      setSignSuccess({
-        name: user?.role === 'coach' ? coachNameInput.trim() : (user?.name ?? 'Unknown'),
-        timestamp: new Date().toLocaleString(),
-      });
-      loadRequest();
+      // Signature recorded — return to the dashboard (mirrors void/delete).
+      navigate('/dashboard');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Signing failed');
-    } finally {
       setSigning(false);
     }
   };
@@ -88,11 +84,14 @@ export function RequestDetail() {
   if (loading) return <div className="page"><p className="muted">Loading…</p></div>;
   if (!req) return <div className="page"><p className="error">{error || 'Request not found.'}</p></div>;
 
+  // Parallel approval: Sport Admin and CFO may approve in any order; each can sign
+  // only if their own approval is still outstanding.
+  const awaitingApproval = req.status === 'PENDING_APPROVAL';
   const canSign =
     (user?.role === 'coach' && req.status === 'PENDING_COACH') ||
-    (user?.role === 'sport_admin' && req.status === 'PENDING_SPORT_ADMIN') ||
-    (user?.role === 'cfo' && req.status === 'PENDING_CFO') ||
-    (user?.role === 'super_admin' && (req.status === 'PENDING_SPORT_ADMIN' || req.status === 'PENDING_CFO'));
+    (user?.role === 'sport_admin' && awaitingApproval && !req.sportAdminSigned) ||
+    (user?.role === 'cfo' && awaitingApproval && !req.cfoSigned) ||
+    (user?.role === 'super_admin' && awaitingApproval && (!req.sportAdminSigned || !req.cfoSigned));
 
   const hasSomeSignatures = req.signatures.length > 0;
 
@@ -114,6 +113,7 @@ export function RequestDetail() {
             <dt>Sport</dt><dd>{req.sportName ?? req.sport}</dd>
             <dt>Term</dt><dd>{req.term}</dd>
             <dt>Premium</dt><dd><strong>${req.premiumCost.toFixed(2)}</strong></dd>
+            <dt>Funding Source</dt><dd>{fundingSourceLabel(req.fundingSource)}</dd>
           </dl>
         </div>
 
@@ -152,13 +152,6 @@ export function RequestDetail() {
       </div>
 
       {error && <p className="error">{error}</p>}
-
-      {signSuccess && (
-        <div className="form-card" style={{ borderLeft: '4px solid #16a34a', background: '#f0fdf4' }}>
-          <h2 style={{ color: '#16a34a' }}>✓ Signature Recorded</h2>
-          <p>Signed by <strong>{signSuccess.name}</strong> at {signSuccess.timestamp}</p>
-        </div>
-      )}
 
       {hasSomeSignatures && (
         <div className="form-card">
@@ -223,7 +216,7 @@ export function RequestDetail() {
             <p style={{ fontSize: '0.875rem', color: '#555', margin: '12px 0' }}>
               By clicking <strong>Approve &amp; Sign</strong>, you confirm that you have reviewed this
               request and authorize the deduction of <strong>${req.premiumCost.toFixed(2)}</strong> from
-              the <strong>{req.sportName ?? req.sport}</strong> operating budget.
+              the <strong>{req.sportName ?? req.sport}</strong> {fundingSourceLabel(req.fundingSource)}.
             </p>
             <button
               className="btn btn-primary"
@@ -279,7 +272,7 @@ export function RequestDetail() {
         </div>
       )}
 
-      {(user?.role === 'cfo' || user?.role === 'super_admin') && ['PENDING_SPORT_ADMIN', 'PENDING_CFO'].includes(req.status) && (
+      {(user?.role === 'cfo' || user?.role === 'super_admin') && req.status === 'PENDING_APPROVAL' && (
         <div className="action-zone action-zone--danger">
           {!showVoidForm ? (
             <button className="btn btn-danger" onClick={() => setShowVoidForm(true)}>

@@ -12,24 +12,39 @@ export interface User {
 
 export type RequestStatus =
   | 'PENDING_COACH'
-  | 'PENDING_SPORT_ADMIN'
-  | 'PENDING_CFO'
+  | 'PENDING_APPROVAL'
   | 'EXECUTED'
   | 'VOIDED'
   | 'EXPIRED';
+
+export type FundingSource = 'operating_budget' | 'foundation_account';
+
+export const FUNDING_SOURCE_LABELS: Record<FundingSource, string> = {
+  operating_budget: 'Operating Budget',
+  foundation_account: 'Foundation Account',
+};
+
+export function fundingSourceLabel(source?: string): string {
+  return FUNDING_SOURCE_LABELS[(source as FundingSource)] ?? 'Operating Budget';
+}
 
 export interface InsuranceRequest {
   id: string;
   studentName: string;
   rocketNumber: string;
+  studentEmail?: string;
   sport: string;
   sportName?: string;
   term: string;
   premiumCost: number;
+  fundingSource: FundingSource;
   status: RequestStatus;
   coachEmail?: string;
   coachName: string;
   createdAt: string;
+  // Derived approval flags (parallel approval model)
+  sportAdminSigned?: boolean;
+  cfoSigned?: boolean;
 }
 
 export interface Signature {
@@ -74,13 +89,17 @@ export interface AthleteEntry {
   firstName: string;
   lastName: string;
   rocketNumber: string;
+  email: string;
   rocketError?: string;
+  emailError?: string;
 }
 
 export interface BulkSubmitPayload {
-  athletes: { studentName: string; rocketNumber: string }[];
+  athletes: { studentName: string; rocketNumber: string; email?: string }[];
   term: string;
   sport: string;
+  fundingSource: FundingSource;
+  coachEmail?: string;
 }
 
 export interface ReportRow {
@@ -92,6 +111,7 @@ export interface ReportRow {
   studentName: string;
   rocketNumber: string;
   premiumCost: number;
+  fundingSource: FundingSource;
   status: RequestStatus;
   createdAt: string;
 }

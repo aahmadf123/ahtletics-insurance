@@ -13,19 +13,25 @@ export interface Env {
   CFO_EMAIL: string;
 }
 
-interface EmailData {
+export interface EmailData {
   studentName: string;
   rocketNumber: string;
+  studentEmail?: string;
   sport: string;
   sportName: string;
   term: string;
   premiumCost: number;
+  fundingSource?: string; // operating_budget | foundation_account
   coachName: string;
   coachEmail: string;
   requestId: string;
   status: string;
   sportAdminName?: string;
   voidReason?: string;
+}
+
+function fundingSourceLabel(source?: string): string {
+  return source === 'foundation_account' ? 'Foundation Account' : 'operating budget';
 }
 
 function actionUrl(env: Env, requestId: string): string {
@@ -48,7 +54,7 @@ function detailsTable(d: EmailData): string {
 <tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Rocket Number</td><td style="padding:6px 12px;border:1px solid #e9ecef">${escapeHtml(d.rocketNumber)}</td></tr>
 <tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Sport</td><td style="padding:6px 12px;border:1px solid #e9ecef">${escapeHtml(d.sportName)}</td></tr>
 <tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Term</td><td style="padding:6px 12px;border:1px solid #e9ecef">${escapeHtml(d.term)}</td></tr>
-<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Premium Cost</td><td style="padding:6px 12px;border:1px solid #e9ecef"><strong>$${d.premiumCost.toFixed(2)}</strong> — will be deducted from ${escapeHtml(d.coachName)}'s operating budget</td></tr>
+<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Premium Cost</td><td style="padding:6px 12px;border:1px solid #e9ecef"><strong>$${d.premiumCost.toFixed(2)}</strong> — will be deducted from ${escapeHtml(d.coachName)}'s ${escapeHtml(fundingSourceLabel(d.fundingSource))}</td></tr>
 <tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Requesting Coach</td><td style="padding:6px 12px;border:1px solid #e9ecef">${escapeHtml(d.coachName)} (${escapeHtml(d.coachEmail)})</td></tr>
 </table>`;
 }
@@ -79,6 +85,27 @@ async function sendEmail(env: Env, to: string, subject: string, html: string): P
 
 // ── Notification triggers ─────────────────────────────────────────────────────
 
+// Confirmation to the coach that their request was submitted and is pending approval.
+export async function notifyCoachSubmitted(env: Env, d: EmailData): Promise<void> {
+  if (!d.coachEmail) return;
+  const subject = `Submitted: Health Insurance Request for ${d.studentName} – ${d.term}`;
+  const body = `<p>Your health insurance request has been submitted and is now pending approval by the Sport Administrator and the CFO.</p>
+${detailsTable(d)}
+<p>You will receive another email once the request has been fully approved. No further action is required from you at this time.</p>`;
+  await sendEmail(env, d.coachEmail, subject, emailHtml(subject, body, actionUrl(env, d.requestId)));
+}
+
+// Confirmation to the student-athlete that a request was submitted on their behalf.
+export async function notifyStudentSubmitted(env: Env, d: EmailData): Promise<void> {
+  if (!d.studentEmail) return;
+  const subject = `Health Insurance Enrollment Request – ${d.term}`;
+  const body = `<p>Hi ${escapeHtml(d.studentName)},</p>
+<p>An athletic health insurance enrollment request has been submitted on your behalf by ${escapeHtml(d.coachName)} (${escapeHtml(d.sportName)}). It is now pending departmental approval.</p>
+${detailsTable(d)}
+<p>You will be notified once enrollment is complete. If you believe this was submitted in error, please contact the Athletics Business Office.</p>`;
+  await sendEmail(env, d.studentEmail, subject, emailHtml(subject, body));
+}
+
 export async function notifyPendingSportAdmin(env: Env, d: EmailData, adminEmail: string): Promise<void> {
   const subject = `Action Required: Health Insurance Request for ${d.studentName} – ${d.sportName}`;
   const body = `<p>A new health insurance request requires your review and signature.</p>
@@ -95,13 +122,13 @@ ${detailsTable(d)}`;
   await sendEmail(env, env.CFO_EMAIL, subject, emailHtml(subject, body, actionUrl(env, d.requestId), 'Final Approval'));
 }
 
-export async function notifyExecuted(env: Env, d: EmailData, adminEmail?: string): Promise<void> {
-  const subject = `Executed: Health Insurance Request for ${d.studentName} – ${d.term}`;
-  const body = `<p>This health insurance request has been fully executed. The premium will be deducted from the program's operating budget.</p>
+// Final confirmation once both approvals are recorded. Sent to the coach and CFO only.
+export async function notifyExecuted(env: Env, d: EmailData): Promise<void> {
+  const subject = `Approved: Health Insurance Request for ${d.studentName} – ${d.term}`;
+  const body = `<p>This health insurance request has been fully approved and executed. The premium will be deducted from the program's ${escapeHtml(fundingSourceLabel(d.fundingSource))}.</p>
 ${detailsTable(d)}
 <p style="color:#1a7a4a;font-weight:600">✓ Enrollment is complete.</p>`;
-  const recipients = [d.coachEmail, env.CFO_EMAIL];
-  if (adminEmail && adminEmail !== env.CFO_EMAIL) recipients.push(adminEmail);
+  const recipients = [d.coachEmail, env.CFO_EMAIL].filter(Boolean);
   for (const to of [...new Set(recipients)]) {
     await sendEmail(env, to, subject, emailHtml(subject, body, actionUrl(env, d.requestId)));
   }
