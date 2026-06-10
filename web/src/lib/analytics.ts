@@ -77,6 +77,10 @@ export async function exportReportXlsx(rows: ReportRow[]): Promise<void> {
   const totalRow: SportSummary = {
     sportName: 'TOTAL',
     count: summary.reduce((n, s) => n + s.count, 0),
+    pendingCoach: summary.reduce((n, s) => n + s.pendingCoach, 0),
+    pendingApproval: summary.reduce((n, s) => n + s.pendingApproval, 0),
+    voidedCount: summary.reduce((n, s) => n + s.voidedCount, 0),
+    expiredCount: summary.reduce((n, s) => n + s.expiredCount, 0),
     committedPremium: summary.reduce((n, s) => n + s.committedPremium, 0),
     executedPremium: summary.reduce((n, s) => n + s.executedPremium, 0),
     executedCount: summary.reduce((n, s) => n + s.executedCount, 0),
