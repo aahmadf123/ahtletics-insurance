@@ -27,7 +27,11 @@ export function RequestDetail() {
     if (!id) return;
     setLoading(true);
     getRequest(id)
-      .then(setReq)
+      .then(r => {
+        setReq(r);
+        // Pre-fill the coach's name (maintained per sport by the Super Admin) for signing.
+        if (r.coachName) setCoachNameInput(prev => prev || r.coachName);
+      })
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
   };

@@ -67,9 +67,18 @@ export interface SportProgram {
   name: string;
   gender: string;
   headCoach?: string;
+  headCoachEmail?: string;
   sportAdminId?: string;
   sportAdminName?: string;
   sportAdminEmail?: string;
+}
+
+export interface SportAdmin {
+  id: string;
+  name: string;
+  title: string;
+  email: string;
+  isCfo: number;
 }
 
 export interface TermOption {

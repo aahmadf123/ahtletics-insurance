@@ -390,12 +390,23 @@ app.post('/auth/register', async c => {
 app.get('/api/sports', async c => {
   const { results } = await c.env.DB.prepare(`
     SELECT sp.id, sp.name, sp.gender, sp.head_coach as headCoach,
+           sp.head_coach_email as headCoachEmail,
            sp.sport_admin_id as sportAdminId,
            sa.name as sportAdminName, sa.email as sportAdminEmail
     FROM sports_programs sp
     LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
     ORDER BY sp.name
   `).all();
+  return json(results);
+});
+
+// GET /api/admin/sport-admins — list selectable sport administrators (admin only)
+app.get('/api/admin/sport-admins', async c => {
+  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
+  const { results } = await c.env.DB.prepare(
+    'SELECT id, name, title, email, is_cfo as isCfo FROM sport_administrators ORDER BY name'
+  ).all();
   return json(results);
 });
 
@@ -466,11 +477,6 @@ app.post('/api/requests', async c => {
     return err('Invalid funding source');
   }
 
-  const coachEmail = body.coachEmail?.trim() || null;
-  if (coachEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(coachEmail)) {
-    return err('Invalid coach email');
-  }
-
   if (!isBeforeDeadline(body.term)) {
     return err('Submission deadline has passed for this term', 422);
   }
@@ -479,6 +485,21 @@ app.post('/api/requests', async c => {
   if (!premiumCost) return err('Unknown term', 400);
 
   const sport = body.sport;
+
+  // Pull the head coach name/email the Super Admin maintains for this sport, so the
+  // coach's info is pre-populated on the request and at signing time.
+  const sportRow = await c.env.DB.prepare(
+    'SELECT head_coach, head_coach_email FROM sports_programs WHERE id = ?'
+  ).bind(sport).first<{ head_coach: string | null; head_coach_email: string | null }>();
+  if (!sportRow) return err('Unknown sport', 400);
+
+  // Coach-provided email wins; otherwise fall back to the sport's head coach email.
+  const coachEmail = (body.coachEmail?.trim() || sportRow.head_coach_email || '') || null;
+  if (coachEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(coachEmail)) {
+    return err('Invalid coach email');
+  }
+  const coachName = sportRow.head_coach?.trim() || '';
+
   const created = [];
 
   for (const athlete of body.athletes) {
@@ -507,7 +528,7 @@ app.post('/api/requests', async c => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       id, athlete.studentName.trim(), athlete.rocketNumber, studentEmail, sport,
-      body.term, premiumCost, fundingSource, initialStatus, coachEmail, ''
+      body.term, premiumCost, fundingSource, initialStatus, coachEmail, coachName
     ).run();
 
     // Audit log
@@ -516,7 +537,7 @@ app.post('/api/requests', async c => {
       VALUES (?, ?, 'SUBMITTED', ?, ?)
     `).bind(newUUID(), id, user.name ?? 'Coach', JSON.stringify({ status: initialStatus, fundingSource })).run();
 
-    created.push({ id, studentName: athlete.studentName.trim(), rocketNumber: athlete.rocketNumber, studentEmail, sport, term: body.term, premiumCost, fundingSource, status: initialStatus, coachEmail, coachName: '' });
+    created.push({ id, studentName: athlete.studentName.trim(), rocketNumber: athlete.rocketNumber, studentEmail, sport, term: body.term, premiumCost, fundingSource, status: initialStatus, coachEmail, coachName });
   }
 
   return json(created, 201);
@@ -1019,14 +1040,78 @@ app.post('/api/requests/bulk-sign', async c => {
   return json({ signed: results.length, results });
 });
 
-// PUT /api/admin/sports/:id — update sport admin assignment
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const slugify = (s: string) =>
+  s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+
+// POST /api/admin/sports — create a new sport/program (Super Admin)
+app.post('/api/admin/sports', async c => {
+  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  if (!user || user.role !== 'super_admin') return err('Only Super Admin can add sports', 403);
+  const { name, gender, headCoach, headCoachEmail, sportAdminId } = await c.req.json<{
+    name: string; gender: string; headCoach?: string; headCoachEmail?: string; sportAdminId?: string;
+  }>();
+  if (!name?.trim() || !gender?.trim()) return err('Name and gender are required');
+  const email = headCoachEmail?.trim() || null;
+  if (email && !EMAIL_RE.test(email)) return err('Invalid head coach email');
+
+  let id = slugify(name);
+  if (!id) return err('Invalid sport name');
+  const clash = await c.env.DB.prepare('SELECT id FROM sports_programs WHERE id = ?').bind(id).first();
+  if (clash) id = `${id}_${newUUID().slice(0, 6)}`;
+
+  await c.env.DB.prepare(
+    'INSERT INTO sports_programs (id, name, gender, head_coach, head_coach_email, sport_admin_id) VALUES (?, ?, ?, ?, ?, ?)'
+  ).bind(id, name.trim(), gender.trim(), headCoach?.trim() || null, email, sportAdminId || null).run();
+
+  return json({ id, name: name.trim(), gender: gender.trim(), headCoach: headCoach?.trim() || null, headCoachEmail: email, sportAdminId: sportAdminId || null }, 201);
+});
+
+// PUT /api/admin/sports/:id — update sport details + admin assignment (Super Admin)
 app.put('/api/admin/sports/:id', async c => {
   const user = await getUser(c.req.raw, c.env.JWT_SECRET);
   if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
   const { id } = c.req.param();
-  const { adminId } = await c.req.json<{ adminId: string | null }>();
-  await c.env.DB.prepare('UPDATE sports_programs SET sport_admin_id = ? WHERE id = ?')
-    .bind(adminId ?? null, id).run();
+  const body = await c.req.json<{
+    name?: string; gender?: string; headCoach?: string | null;
+    headCoachEmail?: string | null; sportAdminId?: string | null; adminId?: string | null;
+  }>();
+
+  const sport = await c.env.DB.prepare('SELECT * FROM sports_programs WHERE id = ?').bind(id).first<Record<string, unknown>>();
+  if (!sport) return err('Not found', 404);
+
+  const email = body.headCoachEmail?.trim() || null;
+  if (email && !EMAIL_RE.test(email)) return err('Invalid head coach email');
+
+  // `adminId` kept for backward compatibility with the old assign-only call.
+  const sportAdminId = body.sportAdminId !== undefined ? body.sportAdminId
+    : body.adminId !== undefined ? body.adminId
+    : (sport.sport_admin_id as string | null);
+
+  await c.env.DB.prepare(`
+    UPDATE sports_programs
+    SET name = ?, gender = ?, head_coach = ?, head_coach_email = ?, sport_admin_id = ?
+    WHERE id = ?
+  `).bind(
+    body.name?.trim() || (sport.name as string),
+    body.gender?.trim() || (sport.gender as string),
+    body.headCoach !== undefined ? (body.headCoach?.trim() || null) : (sport.head_coach as string | null),
+    body.headCoachEmail !== undefined ? email : (sport.head_coach_email as string | null),
+    sportAdminId || null,
+    id,
+  ).run();
+
+  return json({ ok: true });
+});
+
+// DELETE /api/admin/sports/:id — remove a sport with no requests (Super Admin)
+app.delete('/api/admin/sports/:id', async c => {
+  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  if (!user || user.role !== 'super_admin') return err('Only Super Admin can delete sports', 403);
+  const { id } = c.req.param();
+  const inUse = await c.env.DB.prepare('SELECT id FROM insurance_requests WHERE sport = ? LIMIT 1').bind(id).first();
+  if (inUse) return err('Cannot delete a sport that already has insurance requests', 409);
+  await c.env.DB.prepare('DELETE FROM sports_programs WHERE id = ?').bind(id).run();
   return json({ ok: true });
 });
 

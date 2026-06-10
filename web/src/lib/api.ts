@@ -3,6 +3,7 @@ import type {
   InsuranceRequest,
   RequestDetail,
   SportProgram,
+  SportAdmin,
   BulkSubmitPayload,
   ReportRow,
 } from '../types';
@@ -184,9 +185,39 @@ export function rejectUser(id: string) {
   return request<{ ok: boolean }>(`/api/admin/users/${id}/reject`, { method: 'PUT' });
 }
 
-// Admin — sports
+// Admin — sports & coaches
+export interface SportInput {
+  name: string;
+  gender: string;
+  headCoach?: string;
+  headCoachEmail?: string;
+  sportAdminId?: string | null;
+}
+
+export function listSportAdmins() {
+  return request<SportAdmin[]>('/api/admin/sport-admins');
+}
+
+export function createSport(data: SportInput) {
+  return request<SportProgram>('/api/admin/sports', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function updateSport(id: string, data: Partial<SportInput>) {
+  return request<{ ok: boolean }>(`/api/admin/sports/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteSport(id: string) {
+  return request<{ ok: boolean }>(`/api/admin/sports/${id}`, { method: 'DELETE' });
+}
+
 export function updateSportAdmin(sportId: string, adminId: string | null) {
-  return request<SportProgram>(`/api/admin/sports/${sportId}`, {
+  return request<{ ok: boolean }>(`/api/admin/sports/${sportId}`, {
     method: 'PUT',
     body: JSON.stringify({ adminId }),
   });

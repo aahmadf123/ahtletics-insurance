@@ -13,6 +13,7 @@ import { NewRequest } from './pages/request/New';
 import { RequestDetail } from './pages/request/Detail';
 import { Reports } from './pages/Reports';
 import { AdminUsers } from './pages/admin/Users';
+import { AdminSports } from './pages/admin/Sports';
 
 function Nav({ user, onLogout }: { user: User; onLogout: () => void }) {
   return (
@@ -27,6 +28,7 @@ function Nav({ user, onLogout }: { user: User; onLogout: () => void }) {
         {user.role === 'coach' && <Link to="/request/new">New Request</Link>}
         {(user.role === 'cfo' || user.role === 'super_admin') && <Link to="/reports">Reports</Link>}
         {(user.role === 'cfo' || user.role === 'super_admin') && <Link to="/admin/users">Users</Link>}
+        {user.role === 'super_admin' && <Link to="/admin/sports">Sports &amp; Coaches</Link>}
       </div>
       <div className="navbar-user">
         <span className="navbar-name">{user.name}</span>
@@ -96,6 +98,9 @@ function AppLayout() {
           } />
           <Route path="/admin/users" element={
             !user ? <Navigate to="/login" replace /> : <AdminUsers />
+          } />
+          <Route path="/admin/sports" element={
+            !user ? <Navigate to="/login" replace /> : <AdminSports />
           } />
           <Route path="/" element={<Navigate to={user ? '/dashboard' : '/login'} replace />} />
           <Route path="*" element={<Navigate to={user ? '/dashboard' : '/login'} replace />} />

@@ -69,6 +69,16 @@ export function NewRequest() {
     }));
   };
 
+  // When a sport is picked, pre-fill the coach email the Super Admin maintains for that
+  // program (coach can still override it).
+  const selectSport = (sportId: string) => {
+    setSport(sportId);
+    const picked = sports.find(s => s.id === sportId);
+    if (picked?.headCoachEmail) setCoachEmail(picked.headCoachEmail);
+  };
+
+  const selectedSport = sports.find(s => s.id === sport);
+
   const addAthlete = () => setAthletes(prev => [...prev, emptyAthlete()]);
 
   const removeAthlete = (index: number) => {
@@ -127,7 +137,7 @@ export function NewRequest() {
               <label>Sport *</label>
               <select
                 value={sport}
-                onChange={e => setSport(e.target.value)}
+                onChange={e => selectSport(e.target.value)}
                 required
               >
                 <option value="">Select a sport…</option>
@@ -135,6 +145,9 @@ export function NewRequest() {
                   <option key={s.id} value={s.id}>{s.name} ({s.gender})</option>
                 ))}
               </select>
+              {selectedSport?.headCoach && (
+                <span className="field-hint">Head Coach: {selectedSport.headCoach}</span>
+              )}
             </div>
             <div className="field">
               <label>Coach Email (optional)</label>
