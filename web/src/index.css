@@ -1117,6 +1117,157 @@ h2 {
   color: var(--green);
 }
 
+/* ── CFO Dashboard ────────────────────────────────────────────── */
+.cfo-dashboard-section {
+  background: white;
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  margin-bottom: 1.25rem;
+  box-shadow: var(--shadow);
+}
+
+.cfo-section-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--blue);
+  margin-bottom: 1rem;
+}
+
+/* Approval pipeline */
+.cfo-pipeline {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  flex-wrap: wrap;
+  margin-bottom: .25rem;
+}
+
+.cfo-pipeline-arrow {
+  color: var(--gray-400);
+  font-size: 1.2rem;
+  flex-shrink: 0;
+}
+
+.cfo-pipeline-card {
+  flex: 1;
+  min-width: 130px;
+  border-radius: var(--radius);
+  padding: .85rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: .2rem;
+  border: 1.5px solid transparent;
+}
+
+.cfo-pipeline-card--pending-coach {
+  background: #f5f5f5;
+  border-color: #dee2e6;
+}
+
+.cfo-pipeline-card--pending-approval {
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+
+.cfo-pipeline-card--executed {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.cfo-pipeline-count {
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: var(--gray-800);
+  line-height: 1;
+}
+
+.cfo-pipeline-card--executed .cfo-pipeline-count {
+  color: var(--green);
+}
+
+.cfo-pipeline-card--pending-approval .cfo-pipeline-count {
+  color: #d97706;
+}
+
+.cfo-pipeline-label {
+  font-size: .82rem;
+  font-weight: 600;
+  color: var(--gray-800);
+}
+
+.cfo-pipeline-sub {
+  font-size: .72rem;
+  color: var(--gray-600);
+}
+
+/* Count badges inside by-sport table */
+.cfo-count-badge {
+  display: inline-block;
+  padding: .15rem .55rem;
+  border-radius: 12px;
+  font-size: .78rem;
+  font-weight: 600;
+}
+
+.cfo-count-badge--coach {
+  background: #e2e3e5;
+  color: #41464b;
+}
+
+.cfo-count-badge--approval {
+  background: #fff3cd;
+  color: #856404;
+}
+
+.cfo-count-badge--executed {
+  background: #d1e7dd;
+  color: #0a3622;
+}
+
+.cfo-count-badge--voided {
+  background: #f8d7da;
+  color: #58151c;
+}
+
+.cfo-count-badge--expired {
+  background: var(--gray-200);
+  color: var(--gray-600);
+}
+
+.cfo-count-zero {
+  color: var(--gray-400);
+  font-size: .85rem;
+}
+
+/* Filtered summary strip */
+.cfo-filtered-summary {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  background: #f0f4ff;
+  border: 1px solid #c7d7f9;
+  border-radius: var(--radius);
+  padding: .6rem 1rem;
+  margin-bottom: .75rem;
+  font-size: .85rem;
+  color: var(--gray-700);
+}
+
+@media (max-width: 700px) {
+  .cfo-pipeline {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .cfo-pipeline-arrow {
+    transform: rotate(90deg);
+    text-align: center;
+  }
+}
+
+
+
 .filters {
   margin-bottom: 1.25rem;
 }

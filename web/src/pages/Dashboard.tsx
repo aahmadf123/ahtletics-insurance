@@ -240,7 +240,7 @@ export function Dashboard() {
                   <td>{r.term}</td>
                   <td>${r.premiumCost.toFixed(2)}</td>
                   <td>{r.coachName}</td>
-                  <td><StatusBadge status={r.status} /></td>
+                  <td><StatusBadge status={r.status} sportAdminSigned={r.sportAdminSigned} cfoSigned={r.cfoSigned} /></td>
                   <td>{new Date(r.createdAt).toLocaleDateString()}</td>
                   <td>
                     <Link to={`/request/${r.id}`} className="link">View</Link>

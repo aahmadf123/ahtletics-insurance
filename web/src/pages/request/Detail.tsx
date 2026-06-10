@@ -103,7 +103,7 @@ export function RequestDetail() {
     <div className="page">
       <div className="page-header">
         <Link to="/dashboard" className="back-link">← Dashboard</Link>
-        <StatusBadge status={req.status} />
+        <StatusBadge status={req.status} sportAdminSigned={req.sportAdminSigned} cfoSigned={req.cfoSigned} />
       </div>
 
       <h1>Insurance Request — {req.studentName}</h1>

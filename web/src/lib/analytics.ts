@@ -4,9 +4,13 @@ import { fundingSourceLabel } from '../types';
 export interface SportSummary {
   sportName: string;
   count: number;
+  pendingCoach: number;
+  pendingApproval: number;
+  executedCount: number;
+  voidedCount: number;
+  expiredCount: number;
   committedPremium: number;
   executedPremium: number;
-  executedCount: number;
 }
 
 /**
@@ -19,10 +23,19 @@ export function summarizeBySport(rows: ReportRow[]): SportSummary[] {
     const key = r.sportName || r.sport || 'Unknown';
     let s = map.get(key);
     if (!s) {
-      s = { sportName: key, count: 0, committedPremium: 0, executedPremium: 0, executedCount: 0 };
+      s = {
+        sportName: key, count: 0,
+        pendingCoach: 0, pendingApproval: 0,
+        executedCount: 0, voidedCount: 0, expiredCount: 0,
+        committedPremium: 0, executedPremium: 0,
+      };
       map.set(key, s);
     }
     s.count += 1;
+    if (r.status === 'PENDING_COACH') s.pendingCoach += 1;
+    if (r.status === 'PENDING_APPROVAL') s.pendingApproval += 1;
+    if (r.status === 'VOIDED') s.voidedCount += 1;
+    if (r.status === 'EXPIRED') s.expiredCount += 1;
     if (r.status === 'EXECUTED' || r.status === 'PENDING_APPROVAL') s.committedPremium += r.premiumCost;
     if (r.status === 'EXECUTED') {
       s.executedPremium += r.premiumCost;
