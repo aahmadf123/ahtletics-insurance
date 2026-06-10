@@ -3,6 +3,12 @@
   "main": "src/index.ts",
   "compatibility_date": "2024-09-23",
   "compatibility_flags": ["nodejs_compat"],
+  // Build the React SPA (web/dist) before bundling/uploading the Worker. Cloudflare
+  // Workers Builds runs `wrangler versions upload` from this directory, which honours
+  // this custom build command, so the assets.directory below exists at deploy time.
+  "build": {
+    "command": "cd .. && npm install && npm run build -w web"
+  },
   "assets": {
     "directory": "../web/dist",
     "binding": "ASSETS",
