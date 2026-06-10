@@ -21,10 +21,12 @@ export const insuranceRequests = sqliteTable("insurance_requests", {
   id: text("id").primaryKey(),
   studentName: text("student_name").notNull(),
   rocketNumber: text("rocket_number").notNull(),
+  studentEmail: text("student_email"), // optional: student-athlete email for confirmations
   sport: text("sport").notNull(),
   term: text("term").notNull(),
   premiumCost: real("premium_cost").notNull(),
-  status: text("status").notNull().default("PENDING_SPORT_ADMIN"),
+  fundingSource: text("funding_source").notNull().default("operating_budget"), // operating_budget | foundation_account
+  status: text("status").notNull().default("PENDING_APPROVAL"),
   workflowInstanceId: text("workflow_instance_id"),
   coachEmail: text("coach_email"), // nullable for anonymous coaches
   coachName: text("coach_name").notNull(),

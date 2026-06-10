@@ -862,6 +862,42 @@ h2 {
   line-height: 1.5;
 }
 
+/* ── Radio group (funding source) ─────────────────────────────── */
+.radio-group {
+  display: flex;
+  gap: .75rem;
+  flex-wrap: wrap;
+}
+
+.radio-option {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  padding: .7rem 1.1rem;
+  border: 1.5px solid var(--gray-200);
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-weight: 600;
+  font-size: .9rem;
+  transition: border-color .15s, background .15s;
+}
+
+.radio-option input[type="radio"] {
+  accent-color: var(--blue);
+}
+
+.radio-option--checked {
+  border-color: var(--blue);
+  background: rgba(0, 61, 165, .04);
+}
+
+.field-hint {
+  display: block;
+  margin-top: .25rem;
+  font-size: .78rem;
+  color: var(--gray-600);
+}
+
 /* ── Status badges ────────────────────────────────────────────── */
 .badge {
   display: inline-block;
@@ -873,14 +909,14 @@ h2 {
   letter-spacing: .4px;
 }
 
-.badge--pending-sport-admin {
-  background: #fff3cd;
-  color: #856404;
+.badge--pending-coach {
+  background: #e2e3e5;
+  color: #41464b;
 }
 
-.badge--pending-cfo {
-  background: #cff4fc;
-  color: #055160;
+.badge--pending-approval {
+  background: #fff3cd;
+  color: #856404;
 }
 
 .badge--executed {

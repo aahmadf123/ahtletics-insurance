@@ -7,9 +7,10 @@ CREATE TABLE IF NOT EXISTS users (
   role TEXT NOT NULL CHECK(role IN ('coach', 'sport_admin', 'cfo', 'super_admin')),
   sport_id TEXT REFERENCES sports_programs(id),
   must_change_password INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'active',
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+-- NOTE: the `status` column is added in migration 0003 (ADD COLUMN). It is intentionally
+-- not declared here so a from-scratch migration run does not hit a duplicate-column error.
 
 -- Sport administrators lookup
 CREATE TABLE IF NOT EXISTS sport_administrators (

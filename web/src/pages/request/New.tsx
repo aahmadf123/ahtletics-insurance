@@ -5,7 +5,7 @@ import { listSports, submitRequest } from '../../lib/api';
 import { PremiumDisplay } from '../../components/PremiumDisplay';
 import { DisclaimerCheckboxes } from '../../components/DisclaimerCheckboxes';
 import { TERM_OPTIONS } from '../../types';
-import type { SportProgram, AthleteEntry } from '../../types';
+import type { SportProgram, AthleteEntry, FundingSource } from '../../types';
 
 const CURRENT_YEAR = new Date().getFullYear();
 
@@ -18,11 +18,18 @@ const TERMS = TERM_OPTIONS.map(t => ({
 }));
 
 function emptyAthlete(): AthleteEntry {
-  return { firstName: '', lastName: '', rocketNumber: '' };
+  return { firstName: '', lastName: '', rocketNumber: '', email: '' };
 }
 
 function validateRocket(val: string): string {
   if (val && !/^R\d{8}$/.test(val)) return 'Must be R followed by 8 digits (e.g. R12345678)';
+  return '';
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function validateEmail(val: string): string {
+  if (val && !EMAIL_RE.test(val)) return 'Enter a valid email address';
   return '';
 }
 
@@ -33,6 +40,8 @@ export function NewRequest() {
   const [sports, setSports] = useState<SportProgram[]>([]);
   const [term, setTerm] = useState('');
   const [sport, setSport] = useState('');
+  const [fundingSource, setFundingSource] = useState<FundingSource>('operating_budget');
+  const [coachEmail, setCoachEmail] = useState('');
   const [athletes, setAthletes] = useState<AthleteEntry[]>([emptyAthlete()]);
   const [allAcknowledged, setAllAcknowledged] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -55,6 +64,7 @@ export function NewRequest() {
       if (i !== index) return a;
       const updated = { ...a, [field]: field === 'rocketNumber' ? value.toUpperCase() : value };
       if (field === 'rocketNumber') updated.rocketError = validateRocket(updated.rocketNumber);
+      if (field === 'email') updated.emailError = validateEmail(updated.email);
       return updated;
     }));
   };
@@ -66,10 +76,11 @@ export function NewRequest() {
     setAthletes(prev => prev.filter((_, i) => i !== index));
   };
 
+  const coachEmailError = validateEmail(coachEmail);
   const athletesValid = athletes.every(
-    a => a.firstName.trim() && a.lastName.trim() && /^R\d{8}$/.test(a.rocketNumber) && !a.rocketError
+    a => a.firstName.trim() && a.lastName.trim() && /^R\d{8}$/.test(a.rocketNumber) && !a.rocketError && !a.emailError
   );
-  const canSubmit = term && sport && athletesValid && allAcknowledged;
+  const canSubmit = term && sport && athletesValid && allAcknowledged && !coachEmailError;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -81,9 +92,12 @@ export function NewRequest() {
         athletes: athletes.map(a => ({
           studentName: `${a.firstName.trim()} ${a.lastName.trim()}`,
           rocketNumber: a.rocketNumber,
+          email: a.email.trim() || undefined,
         })),
         term,
         sport,
+        fundingSource,
+        coachEmail: coachEmail.trim() || undefined,
       });
       if (results.length === 1) {
         navigate(`/request/${results[0].id}`);
@@ -122,6 +136,48 @@ export function NewRequest() {
                 ))}
               </select>
             </div>
+            <div className="field">
+              <label>Coach Email (optional)</label>
+              <input
+                type="email"
+                value={coachEmail}
+                onChange={e => setCoachEmail(e.target.value)}
+                placeholder="you@utoledo.edu"
+                maxLength={200}
+              />
+              {coachEmailError && <span className="field-error">{coachEmailError}</span>}
+              <span className="field-hint">We'll email you a confirmation and the final approval notice.</span>
+            </div>
+          </div>
+        </fieldset>
+
+        {/* Funding source */}
+        <fieldset className="fieldset">
+          <legend>Funding Source *</legend>
+          <p className="page-subtitle" style={{ marginTop: 0 }}>
+            Choose which account the premium will be deducted from.
+          </p>
+          <div className="radio-group">
+            <label className={`radio-option ${fundingSource === 'operating_budget' ? 'radio-option--checked' : ''}`}>
+              <input
+                type="radio"
+                name="fundingSource"
+                value="operating_budget"
+                checked={fundingSource === 'operating_budget'}
+                onChange={() => setFundingSource('operating_budget')}
+              />
+              <span>Operating Budget</span>
+            </label>
+            <label className={`radio-option ${fundingSource === 'foundation_account' ? 'radio-option--checked' : ''}`}>
+              <input
+                type="radio"
+                name="fundingSource"
+                value="foundation_account"
+                checked={fundingSource === 'foundation_account'}
+                onChange={() => setFundingSource('foundation_account')}
+              />
+              <span>Foundation Account</span>
+            </label>
           </div>
         </fieldset>
 
@@ -138,7 +194,12 @@ export function NewRequest() {
             </select>
           </div>
           {selectedTerm && (
-            <PremiumDisplay term={term} premium={selectedTerm.premium} athleteCount={athletes.length} />
+            <PremiumDisplay
+              term={term}
+              premium={selectedTerm.premium}
+              athleteCount={athletes.length}
+              fundingSource={fundingSource}
+            />
           )}
         </fieldset>
 
@@ -201,6 +262,20 @@ export function NewRequest() {
                     <span className="field-error">{athlete.rocketError}</span>
                   )}
                 </div>
+
+                <div className="field">
+                  <label>Student Email (optional)</label>
+                  <input
+                    type="email"
+                    value={athlete.email}
+                    onChange={e => updateAthlete(index, 'email', e.target.value)}
+                    placeholder="student@rockets.utoledo.edu"
+                    maxLength={200}
+                  />
+                  {athlete.emailError && (
+                    <span className="field-error">{athlete.emailError}</span>
+                  )}
+                </div>
               </div>
             </div>
           ))}
@@ -213,7 +288,7 @@ export function NewRequest() {
         {/* Disclaimer checkboxes */}
         <fieldset className="fieldset">
           <legend>Required Acknowledgments</legend>
-          <DisclaimerCheckboxes deadline={deadline} onChange={setAllAcknowledged} />
+          <DisclaimerCheckboxes deadline={deadline} fundingSource={fundingSource} onChange={setAllAcknowledged} />
         </fieldset>
 
         {error && <p className="error">{error}</p>}

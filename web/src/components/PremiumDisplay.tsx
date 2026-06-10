@@ -1,10 +1,14 @@
+import type { FundingSource } from '../types';
+import { fundingSourceLabel } from '../types';
+
 interface PremiumDisplayProps {
   term: string;
   premium: number;
   athleteCount?: number;
+  fundingSource?: FundingSource;
 }
 
-export function PremiumDisplay({ term, premium, athleteCount }: PremiumDisplayProps) {
+export function PremiumDisplay({ term, premium, athleteCount, fundingSource }: PremiumDisplayProps) {
   const count = athleteCount ?? 1;
   const total = premium * count;
 
@@ -32,7 +36,7 @@ export function PremiumDisplay({ term, premium, athleteCount }: PremiumDisplayPr
         </div>
       )}
       <p className="premium-note">
-        This amount will be deducted entirely from your program's operating budget.
+        This amount will be deducted entirely from your program's {fundingSourceLabel(fundingSource)}.
       </p>
     </div>
   );

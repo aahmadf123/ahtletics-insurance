@@ -1,11 +1,14 @@
 import { useState } from 'react';
+import type { FundingSource } from '../types';
+import { fundingSourceLabel } from '../types';
 
 interface DisclaimerCheckboxesProps {
   deadline: string;
+  fundingSource?: FundingSource;
   onChange: (allChecked: boolean) => void;
 }
 
-export function DisclaimerCheckboxes({ deadline, onChange }: DisclaimerCheckboxesProps) {
+export function DisclaimerCheckboxes({ deadline, fundingSource, onChange }: DisclaimerCheckboxesProps) {
   const [checked, setChecked] = useState([false, false, false]);
 
   const toggle = (i: number) => {
@@ -20,7 +23,7 @@ export function DisclaimerCheckboxes({ deadline, onChange }: DisclaimerCheckboxe
         checked={checked[0]}
         onToggle={() => toggle(0)}
         label="Budget Deduction Authorization"
-        text="By checking this box and applying my digital signature, I acknowledge and authorize that the total cost of the student-athlete health insurance premium for the selected term will be deducted entirely from my program's operating budget. I understand that the central Athletics department will not cover or subsidize this expense under any circumstances."
+        text={`By checking this box and applying my digital signature, I acknowledge and authorize that the total cost of the student-athlete health insurance premium for the selected term will be deducted entirely from my program's ${fundingSourceLabel(fundingSource)}. I understand that the central Athletics department will not cover or subsidize this expense under any circumstances.`}
       />
       <Disclaimer
         checked={checked[1]}

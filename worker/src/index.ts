@@ -5,6 +5,7 @@ import {
 } from './lib/auth';
 import {
   notifyPendingSportAdmin, notifyPendingCFO, notifyExecuted, notifyVoided, notifyReminder,
+  notifyCoachSubmitted, notifyStudentSubmitted, type EmailData,
 } from './lib/email';
 import {
   validateRocketNumber, isBeforeDeadline, getPremiumForTerm, getSubmissionDeadline, newUUID,
@@ -65,6 +66,67 @@ function err(message: string, status = 400) {
 
 const isSecure = (req: Request) =>
   new URL(req.url).protocol === 'https:';
+
+// ── Approval helpers (parallel approval model) ───────────────────────────────
+
+const FUNDING_SOURCES = ['operating_budget', 'foundation_account'] as const;
+
+// Softball's sport administrator IS the CFO (Melissa DeAngelo), so a single CFO
+// approval is sufficient; every other sport needs both Sport Admin and CFO.
+const isSoftball = (sport: string) => sport === 'womens_softball';
+
+/** True once all required approvals (Sport Admin + CFO, or just CFO for softball) exist. */
+async function hasAllApprovals(env: Env, id: string, sport: string): Promise<boolean> {
+  const { results } = await env.DB.prepare(
+    `SELECT signatory_role FROM signatures WHERE request_id = ? AND signatory_role IN ('SPORT_ADMIN', 'CFO')`
+  ).bind(id).all<{ signatory_role: string }>();
+  const roles = new Set(results.map(r => r.signatory_role));
+  if (isSoftball(sport)) return roles.has('CFO');
+  return roles.has('SPORT_ADMIN') && roles.has('CFO');
+}
+
+/** Build the notification payload (incl. sport admin email) for a request. */
+async function loadRequestEmailData(
+  env: Env,
+  id: string,
+): Promise<(EmailData & { sportAdminEmail?: string }) | null> {
+  const r = await env.DB.prepare(`
+    SELECT ir.student_name, ir.rocket_number, ir.student_email, ir.sport, sp.name as sportName,
+           ir.term, ir.premium_cost, ir.funding_source, ir.coach_name, ir.coach_email,
+           sa.email as sportAdminEmail, sa.name as sportAdminName
+    FROM insurance_requests ir
+    LEFT JOIN sports_programs sp ON ir.sport = sp.id
+    LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
+    WHERE ir.id = ?
+  `).bind(id).first<Record<string, unknown>>();
+  if (!r) return null;
+  return {
+    studentName: r.student_name as string,
+    rocketNumber: r.rocket_number as string,
+    studentEmail: (r.student_email as string) || undefined,
+    sport: r.sport as string,
+    sportName: (r.sportName as string) ?? (r.sport as string),
+    term: r.term as string,
+    premiumCost: r.premium_cost as number,
+    fundingSource: (r.funding_source as string) || 'operating_budget',
+    coachName: r.coach_name as string,
+    coachEmail: (r.coach_email as string) || '',
+    requestId: id,
+    status: '',
+    sportAdminName: (r.sportAdminName as string) ?? undefined,
+    sportAdminEmail: (r.sportAdminEmail as string) ?? undefined,
+  };
+}
+
+/** On coach submission: confirm to coach + student, and ask both approvers to act. */
+async function notifySubmission(env: Env, d: EmailData & { sportAdminEmail?: string }): Promise<void> {
+  await notifyCoachSubmitted(env, d);
+  await notifyStudentSubmitted(env, d);
+  if (!isSoftball(d.sport) && d.sportAdminEmail) {
+    await notifyPendingSportAdmin(env, d, d.sportAdminEmail);
+  }
+  await notifyPendingCFO(env, d);
+}
 
 // ── Auth routes ───────────────────────────────────────────────────────────────
 
@@ -348,11 +410,14 @@ app.get('/api/requests', async c => {
 
   let query = `
     SELECT ir.id, ir.student_name as studentName, ir.rocket_number as rocketNumber,
-           ir.sport, ir.term, ir.premium_cost as premiumCost, ir.status,
+           ir.sport, ir.term, ir.premium_cost as premiumCost,
+           ir.funding_source as fundingSource, ir.status,
            ir.coach_email as coachEmail, ir.coach_name as coachName,
            ir.created_at as createdAt,
            sp.name as sportName,
-           sa.name as sportAdminName, sa.email as sportAdminEmail
+           sa.name as sportAdminName, sa.email as sportAdminEmail,
+           EXISTS(SELECT 1 FROM signatures s WHERE s.request_id = ir.id AND s.signatory_role = 'SPORT_ADMIN') as sportAdminSigned,
+           EXISTS(SELECT 1 FROM signatures s WHERE s.request_id = ir.id AND s.signatory_role = 'CFO') as cfoSigned
     FROM insurance_requests ir
     LEFT JOIN sports_programs sp ON ir.sport = sp.id
     LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
@@ -386,13 +451,25 @@ app.post('/api/requests', async c => {
   if (user.role !== 'coach') return err('Only coaches can submit requests', 403);
 
   const body = await c.req.json<{
-    athletes: { studentName: string; rocketNumber: string }[];
+    athletes: { studentName: string; rocketNumber: string; email?: string }[];
     term: string;
     sport: string;
+    fundingSource?: string;
+    coachEmail?: string;
   }>();
 
   if (!body.athletes?.length || !body.term) return err('Missing athletes or term');
   if (!body.sport) return err('Sport is required');
+
+  const fundingSource = body.fundingSource ?? 'operating_budget';
+  if (!FUNDING_SOURCES.includes(fundingSource as typeof FUNDING_SOURCES[number])) {
+    return err('Invalid funding source');
+  }
+
+  const coachEmail = body.coachEmail?.trim() || null;
+  if (coachEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(coachEmail)) {
+    return err('Invalid coach email');
+  }
 
   if (!isBeforeDeadline(body.term)) {
     return err('Submission deadline has passed for this term', 422);
@@ -409,6 +486,10 @@ app.post('/api/requests', async c => {
     if (!validateRocketNumber(athlete.rocketNumber)) {
       return err(`Invalid Rocket Number: ${athlete.rocketNumber}`);
     }
+    const studentEmail = athlete.email?.trim() || null;
+    if (studentEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(studentEmail)) {
+      return err(`Invalid email for ${athlete.studentName.trim()}`);
+    }
 
     const duplicate = await c.env.DB.prepare(
       'SELECT id FROM insurance_requests WHERE rocket_number = ? AND term = ? AND sport = ?'
@@ -418,25 +499,24 @@ app.post('/api/requests', async c => {
     }
 
     const id = newUUID();
-    const ip = c.req.header('CF-Connecting-IP') ?? c.req.header('X-Forwarded-For') ?? 'unknown';
     const initialStatus = 'PENDING_COACH';
 
     await c.env.DB.prepare(`
       INSERT INTO insurance_requests
-        (id, student_name, rocket_number, sport, term, premium_cost, status, coach_email, coach_name)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (id, student_name, rocket_number, student_email, sport, term, premium_cost, funding_source, status, coach_email, coach_name)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
-      id, athlete.studentName.trim(), athlete.rocketNumber, sport,
-      body.term, premiumCost, initialStatus, null, ''
+      id, athlete.studentName.trim(), athlete.rocketNumber, studentEmail, sport,
+      body.term, premiumCost, fundingSource, initialStatus, coachEmail, ''
     ).run();
 
     // Audit log
     await c.env.DB.prepare(`
       INSERT INTO audit_log (id, request_id, action, performed_by, details)
       VALUES (?, ?, 'SUBMITTED', ?, ?)
-    `).bind(newUUID(), id, user.name ?? 'Coach', JSON.stringify({ status: initialStatus })).run();
+    `).bind(newUUID(), id, user.name ?? 'Coach', JSON.stringify({ status: initialStatus, fundingSource })).run();
 
-    created.push({ id, studentName: athlete.studentName.trim(), rocketNumber: athlete.rocketNumber, sport, term: body.term, premiumCost, status: initialStatus, coachEmail: null, coachName: '' });
+    created.push({ id, studentName: athlete.studentName.trim(), rocketNumber: athlete.rocketNumber, studentEmail, sport, term: body.term, premiumCost, fundingSource, status: initialStatus, coachEmail, coachName: '' });
   }
 
   return json(created, 201);
@@ -450,11 +530,15 @@ app.get('/api/requests/:id', async c => {
 
   const req = await c.env.DB.prepare(`
     SELECT ir.id, ir.student_name as studentName, ir.rocket_number as rocketNumber,
-           ir.sport, ir.term, ir.premium_cost as premiumCost, ir.status,
+           ir.student_email as studentEmail,
+           ir.sport, ir.term, ir.premium_cost as premiumCost,
+           ir.funding_source as fundingSource, ir.status,
            ir.coach_email as coachEmail, ir.coach_name as coachName,
            ir.created_at as createdAt,
            sp.name as sportName,
-           sa.name as sportAdminName, sa.email as sportAdminEmail
+           sa.name as sportAdminName, sa.email as sportAdminEmail,
+           EXISTS(SELECT 1 FROM signatures s WHERE s.request_id = ir.id AND s.signatory_role = 'SPORT_ADMIN') as sportAdminSigned,
+           EXISTS(SELECT 1 FROM signatures s WHERE s.request_id = ir.id AND s.signatory_role = 'CFO') as cfoSigned
     FROM insurance_requests ir
     LEFT JOIN sports_programs sp ON ir.sport = sp.id
     LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
@@ -487,49 +571,47 @@ app.post('/api/requests/:id/sign', async c => {
   const ip = c.req.header('cf-connecting-ip') ?? c.req.header('x-forwarded-for') ?? 'unknown';
 
   const req = await c.env.DB.prepare(`
-    SELECT ir.id, ir.status, ir.sport, ir.coach_email as coachEmail,
-           sp.sport_admin_id as sportAdminId
+    SELECT ir.id, ir.status, ir.sport, ir.coach_email as coachEmail
     FROM insurance_requests ir
-    LEFT JOIN sports_programs sp ON ir.sport = sp.id
     WHERE ir.id = ?
-  `).bind(id).first<{
-    id: string; status: string; sport: string; coachEmail: string; sportAdminId: string | null;
-  }>();
+  `).bind(id).first<{ id: string; status: string; sport: string; coachEmail: string }>();
 
   if (!req) return err('Not found', 404);
 
-  // Determine expected signer role
-  let sigRole: string;
-  if (user.role === 'super_admin') {
-    if (req.status === 'PENDING_SPORT_ADMIN') sigRole = 'SPORT_ADMIN';
-    else if (req.status === 'PENDING_CFO') sigRole = 'CFO';
-    else return err('This request is not awaiting any approval', 409);
-  } else if (user.role === 'coach') {
+  // Existing approver signatures (parallel approval: either may go first)
+  const { results: existingSigs } = await c.env.DB.prepare(
+    'SELECT signatory_role FROM signatures WHERE request_id = ?'
+  ).bind(id).all<{ signatory_role: string }>();
+  const signedRoles = new Set(existingSigs.map(s => s.signatory_role));
+
+  // Determine which role this user signs as
+  let sigRole: 'COACH' | 'SPORT_ADMIN' | 'CFO';
+  if (user.role === 'coach') {
     sigRole = 'COACH';
+  } else if (user.role === 'cfo') {
+    sigRole = 'CFO';
+  } else if (user.role === 'sport_admin') {
+    sigRole = 'SPORT_ADMIN';
   } else {
-    sigRole = user.role === 'cfo' ? 'CFO' : 'SPORT_ADMIN';
+    // super_admin fills whichever required approval is still outstanding
+    if (req.status !== 'PENDING_APPROVAL') return err('This request is not awaiting approval', 409);
+    if (!signedRoles.has('CFO')) sigRole = 'CFO';
+    else if (!signedRoles.has('SPORT_ADMIN') && !isSoftball(req.sport)) sigRole = 'SPORT_ADMIN';
+    else return err('All required approvals are already recorded', 409);
   }
 
   // Validate status matches the expected signer
   if (sigRole === 'COACH' && req.status !== 'PENDING_COACH') {
     return err('This request is not awaiting coach signature', 409);
   }
-  if (sigRole === 'SPORT_ADMIN' && req.status !== 'PENDING_SPORT_ADMIN') {
-    return err('This request is not awaiting sport admin approval', 409);
+  if (sigRole !== 'COACH' && req.status !== 'PENDING_APPROVAL') {
+    return err('This request is not awaiting approval', 409);
   }
-  if (sigRole === 'CFO' && req.status !== 'PENDING_CFO') {
-    return err('This request is not awaiting CFO approval', 409);
-  }
+  if (signedRoles.has(sigRole)) return err('Already signed', 409);
 
   const signatoryName = sigRole === 'COACH' ? (coachName?.trim() || 'Unknown Coach') : user.name;
 
-  // Check for duplicate signature
-  const existing = await c.env.DB.prepare(
-    'SELECT id FROM signatures WHERE request_id = ? AND signatory_role = ?'
-  ).bind(id, sigRole).first();
-  if (existing) return err('Already signed', 409);
-
-  // Record signature
+  // Record signature + audit
   await c.env.DB.prepare(`
     INSERT INTO signatures (id, request_id, signatory_role, signatory_email, signatory_name, ip_address)
     VALUES (?, ?, ?, ?, ?, ?)
@@ -540,99 +622,23 @@ app.post('/api/requests/:id/sign', async c => {
     VALUES (?, ?, 'SIGNED', ?, ?)
   `).bind(newUUID(), id, user.email || signatoryName, JSON.stringify({ role: sigRole })).run();
 
-  // Advance status
+  // Advance status + notify
   let newStatus: string;
   if (sigRole === 'COACH') {
-    const isSoftball = req.sport === 'womens_softball';
-    newStatus = isSoftball ? 'PENDING_CFO' : 'PENDING_SPORT_ADMIN';
-    
+    newStatus = 'PENDING_APPROVAL';
     await c.env.DB.prepare('UPDATE insurance_requests SET status = ?, coach_name = ? WHERE id = ?')
       .bind(newStatus, signatoryName, id).run();
-
-    // Fetch details for email
-    const emailReq = await c.env.DB.prepare(`
-      SELECT ir.student_name, ir.rocket_number, ir.sport, sp.name as sportName,
-             ir.term, ir.premium_cost, ir.coach_name, ir.coach_email,
-             sa.email as sportAdminEmail
-      FROM insurance_requests ir
-      LEFT JOIN sports_programs sp ON ir.sport = sp.id
-      LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
-      WHERE ir.id = ?
-    `).bind(id).first<Record<string, unknown>>();
-
-    if (emailReq) {
-      const emailData = {
-        studentName: emailReq.student_name as string,
-        rocketNumber: emailReq.rocket_number as string,
-        sport: emailReq.sport as string,
-        sportName: (emailReq.sportName as string) ?? (emailReq.sport as string),
-        term: emailReq.term as string,
-        premiumCost: emailReq.premium_cost as number,
-        coachName: emailReq.coach_name as string,
-        coachEmail: (emailReq.coach_email as string) || '',
-        requestId: id,
-        status: newStatus,
-      };
-      if (isSoftball) {
-        await notifyPendingCFO(c.env, emailData);
-      } else if (emailReq.sportAdminEmail) {
-        await notifyPendingSportAdmin(c.env, emailData, emailReq.sportAdminEmail as string);
-      }
-    }
-  } else if (sigRole === 'SPORT_ADMIN') {
-    newStatus = 'PENDING_CFO';
-    await c.env.DB.prepare('UPDATE insurance_requests SET status = ? WHERE id = ?')
-      .bind(newStatus, id).run();
-    // Notify CFO
-    const emailReq = await c.env.DB.prepare(`
-      SELECT ir.student_name, ir.rocket_number, ir.sport, sp.name as sportName,
-             ir.term, ir.premium_cost, ir.coach_name, ir.coach_email
-      FROM insurance_requests ir
-      LEFT JOIN sports_programs sp ON ir.sport = sp.id
-      WHERE ir.id = ?
-    `).bind(id).first<Record<string, unknown>>();
-    if (emailReq) {
-      await notifyPendingCFO(c.env, {
-        studentName: emailReq.student_name as string,
-        rocketNumber: emailReq.rocket_number as string,
-        sport: emailReq.sport as string,
-        sportName: (emailReq.sportName as string) ?? (emailReq.sport as string),
-        term: emailReq.term as string,
-        premiumCost: emailReq.premium_cost as number,
-        coachName: emailReq.coach_name as string,
-        coachEmail: emailReq.coach_email as string,
-        requestId: id,
-        status: newStatus,
-      });
-    }
+    const d = await loadRequestEmailData(c.env, id);
+    if (d) { d.status = newStatus; await notifySubmission(c.env, d); }
   } else {
-    // CFO signed → EXECUTED
-    newStatus = 'EXECUTED';
+    // Sport Admin or CFO approval — executed once all required approvals exist
+    const allApproved = await hasAllApprovals(c.env, id, req.sport);
+    newStatus = allApproved ? 'EXECUTED' : 'PENDING_APPROVAL';
     await c.env.DB.prepare('UPDATE insurance_requests SET status = ? WHERE id = ?')
       .bind(newStatus, id).run();
-    // Notify executed
-    const emailReq = await c.env.DB.prepare(`
-      SELECT ir.student_name, ir.rocket_number, ir.sport, sp.name as sportName,
-             ir.term, ir.premium_cost, ir.coach_name, ir.coach_email,
-             sa.email as sportAdminEmail
-      FROM insurance_requests ir
-      LEFT JOIN sports_programs sp ON ir.sport = sp.id
-      LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
-      WHERE ir.id = ?
-    `).bind(id).first<Record<string, unknown>>();
-    if (emailReq) {
-      await notifyExecuted(c.env, {
-        studentName: emailReq.student_name as string,
-        rocketNumber: emailReq.rocket_number as string,
-        sport: emailReq.sport as string,
-        sportName: (emailReq.sportName as string) ?? (emailReq.sport as string),
-        term: emailReq.term as string,
-        premiumCost: emailReq.premium_cost as number,
-        coachName: emailReq.coach_name as string,
-        coachEmail: emailReq.coach_email as string,
-        requestId: id,
-        status: newStatus,
-      }, emailReq.sportAdminEmail as string ?? undefined);
+    if (allApproved) {
+      const d = await loadRequestEmailData(c.env, id);
+      if (d) { d.status = newStatus; await notifyExecuted(c.env, d); }
     }
   }
 
@@ -648,7 +654,8 @@ app.get('/api/requests/:id/pdf', async c => {
 
   const req = await c.env.DB.prepare(`
     SELECT ir.id, ir.student_name as studentName, ir.rocket_number as rocketNumber,
-           ir.sport, ir.term, ir.premium_cost as premiumCost, ir.status,
+           ir.sport, ir.term, ir.premium_cost as premiumCost,
+           ir.funding_source as fundingSource, ir.status,
            ir.coach_email as coachEmail, ir.coach_name as coachName,
            sp.name as sportName
     FROM insurance_requests ir
@@ -656,7 +663,7 @@ app.get('/api/requests/:id/pdf', async c => {
     WHERE ir.id = ?
   `).bind(id).first<{
     id: string; studentName: string; rocketNumber: string; sport: string;
-    term: string; premiumCost: number; status: string;
+    term: string; premiumCost: number; fundingSource: string; status: string;
     coachEmail: string; coachName: string; sportName: string | null;
   }>();
 
@@ -675,6 +682,7 @@ app.get('/api/requests/:id/pdf', async c => {
     sport: req.sportName ?? req.sport,
     term: req.term,
     premiumCost: `$${req.premiumCost.toFixed(2)}`,
+    fundingSource: req.fundingSource,
     coachName: req.coachName,
     coachEmail: req.coachEmail,
     submissionDeadline: getSubmissionDeadline(req.term),
@@ -715,7 +723,7 @@ app.post('/api/requests/:id/void', async c => {
   `).bind(id).first<Record<string, unknown>>();
 
   if (!req) return err('Not found', 404);
-  if (!['PENDING_SPORT_ADMIN', 'PENDING_CFO'].includes(req.status as string)) {
+  if (req.status !== 'PENDING_APPROVAL') {
     return err('Only active requests can be voided', 409);
   }
 
@@ -730,10 +738,12 @@ app.post('/api/requests/:id/void', async c => {
   const emailData = {
     studentName: req.student_name as string,
     rocketNumber: req.rocket_number as string,
+    studentEmail: (req.student_email as string) || undefined,
     sport: req.sport as string,
     sportName: req.sportName as string ?? req.sport,
     term: req.term as string,
     premiumCost: req.premium_cost as number,
+    fundingSource: (req.funding_source as string) || 'operating_budget',
     coachName: req.coach_name as string,
     coachEmail: req.coach_email as string,
     requestId: id,
@@ -778,7 +788,7 @@ app.get('/api/reports', async c => {
     SELECT ir.id, ir.student_name as studentName, ir.rocket_number as rocketNumber,
            ir.sport, sp.name as sportName, ir.term, ir.coach_name as coachName,
            ir.coach_email as coachEmail, ir.premium_cost as premiumCost,
-           ir.status, ir.created_at as createdAt
+           ir.funding_source as fundingSource, ir.status, ir.created_at as createdAt
     FROM insurance_requests ir
     LEFT JOIN sports_programs sp ON ir.sport = sp.id
     WHERE 1=1
@@ -806,7 +816,7 @@ app.get('/api/reports/csv', async c => {
   const { sport, term, status, coach } = c.req.query();
   let query = `
     SELECT ir.student_name, ir.rocket_number, ir.sport,
-           sp.name as sport_name, ir.term, ir.coach_name, ir.coach_email,
+           sp.name as sport_name, ir.term, ir.funding_source, ir.coach_name, ir.coach_email,
            ir.premium_cost, ir.status, ir.created_at
     FROM insurance_requests ir
     LEFT JOIN sports_programs sp ON ir.sport = sp.id
@@ -824,7 +834,8 @@ app.get('/api/reports/csv', async c => {
   const stmt = params.reduce((s, p) => s.bind(p), c.env.DB.prepare(query));
   const { results } = await stmt.all<Record<string, unknown>>();
 
-  const headers = ['Student Name', 'Rocket Number', 'Sport', 'Term', 'Coach', 'Coach Email', 'Premium ($)', 'Status', 'Submitted'];
+  const fundingLabel = (s: unknown) => (s === 'foundation_account' ? 'Foundation Account' : 'Operating Budget');
+  const headers = ['Student Name', 'Rocket Number', 'Sport', 'Term', 'Funding Source', 'Coach', 'Coach Email', 'Premium ($)', 'Status', 'Submitted'];
   const csvRows = [
     headers.join(','),
     ...results.map(r => [
@@ -832,6 +843,7 @@ app.get('/api/reports/csv', async c => {
       csvEscape(String(r.rocket_number ?? '')),
       csvEscape(String(r.sport_name ?? r.sport ?? '')),
       csvEscape(String(r.term ?? '')),
+      csvEscape(fundingLabel(r.funding_source)),
       csvEscape(String(r.coach_name ?? '')),
       csvEscape(String(r.coach_email ?? '')),
       String(r.premium_cost ?? '0'),
@@ -947,27 +959,31 @@ app.post('/api/requests/bulk-sign', async c => {
 
     if (!req) continue;
 
-    let sigRole: string;
-    if (user.role === 'super_admin') {
-      if (req.status === 'PENDING_SPORT_ADMIN') sigRole = 'SPORT_ADMIN';
-      else if (req.status === 'PENDING_CFO') sigRole = 'CFO';
-      else continue;
-    } else if (user.role === 'coach') {
+    const { results: existingSigs } = await c.env.DB.prepare(
+      'SELECT signatory_role FROM signatures WHERE request_id = ?'
+    ).bind(id).all<{ signatory_role: string }>();
+    const signedRoles = new Set(existingSigs.map(s => s.signatory_role));
+
+    let sigRole: 'COACH' | 'SPORT_ADMIN' | 'CFO';
+    if (user.role === 'coach') {
       sigRole = 'COACH';
+    } else if (user.role === 'cfo') {
+      sigRole = 'CFO';
+    } else if (user.role === 'sport_admin') {
+      sigRole = 'SPORT_ADMIN';
     } else {
-      sigRole = user.role === 'cfo' ? 'CFO' : 'SPORT_ADMIN';
+      // super_admin fills whichever required approval is still outstanding
+      if (req.status !== 'PENDING_APPROVAL') continue;
+      if (!signedRoles.has('CFO')) sigRole = 'CFO';
+      else if (!signedRoles.has('SPORT_ADMIN') && !isSoftball(req.sport)) sigRole = 'SPORT_ADMIN';
+      else continue;
     }
 
     if (sigRole === 'COACH' && req.status !== 'PENDING_COACH') continue;
-    if (sigRole === 'SPORT_ADMIN' && req.status !== 'PENDING_SPORT_ADMIN') continue;
-    if (sigRole === 'CFO' && req.status !== 'PENDING_CFO') continue;
+    if (sigRole !== 'COACH' && req.status !== 'PENDING_APPROVAL') continue;
+    if (signedRoles.has(sigRole)) continue;
 
     const signatoryName = sigRole === 'COACH' ? (coachName?.trim() || 'Unknown Coach') : user.name;
-
-    const existing = await c.env.DB.prepare(
-      'SELECT id FROM signatures WHERE request_id = ? AND signatory_role = ?'
-    ).bind(id, sigRole).first();
-    if (existing) continue;
 
     await c.env.DB.prepare(`
       INSERT INTO signatures (id, request_id, signatory_role, signatory_email, signatory_name, ip_address)
@@ -981,48 +997,20 @@ app.post('/api/requests/bulk-sign', async c => {
 
     let newStatus: string;
     if (sigRole === 'COACH') {
-      const isSoftball = req.sport === 'womens_softball';
-      newStatus = isSoftball ? 'PENDING_CFO' : 'PENDING_SPORT_ADMIN';
+      newStatus = 'PENDING_APPROVAL';
       await c.env.DB.prepare('UPDATE insurance_requests SET status = ?, coach_name = ? WHERE id = ?')
         .bind(newStatus, signatoryName, id).run();
-
-      // Email notifications for new requests
-      const emailReq = await c.env.DB.prepare(`
-        SELECT ir.student_name, ir.rocket_number, ir.sport, sp.name as sportName,
-               ir.term, ir.premium_cost, ir.coach_name, ir.coach_email, sa.email as sportAdminEmail
-        FROM insurance_requests ir
-        LEFT JOIN sports_programs sp ON ir.sport = sp.id
-        LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
-        WHERE ir.id = ?
-      `).bind(id).first<Record<string, unknown>>();
-
-      if (emailReq) {
-        const emailData = {
-          studentName: emailReq.student_name as string,
-          rocketNumber: emailReq.rocket_number as string,
-          sport: emailReq.sport as string,
-          sportName: (emailReq.sportName as string) ?? (emailReq.sport as string),
-          term: emailReq.term as string,
-          premiumCost: emailReq.premium_cost as number,
-          coachName: emailReq.coach_name as string,
-          coachEmail: (emailReq.coach_email as string) || '',
-          requestId: id,
-          status: newStatus,
-        };
-        if (isSoftball) {
-          await notifyPendingCFO(c.env, emailData);
-        } else if (emailReq.sportAdminEmail) {
-          await notifyPendingSportAdmin(c.env, emailData, emailReq.sportAdminEmail as string);
-        }
-      }
-    } else if (sigRole === 'SPORT_ADMIN') {
-      newStatus = 'PENDING_CFO';
-      await c.env.DB.prepare('UPDATE insurance_requests SET status = ? WHERE id = ?')
-        .bind(newStatus, id).run();
+      const d = await loadRequestEmailData(c.env, id);
+      if (d) { d.status = newStatus; await notifySubmission(c.env, d); }
     } else {
-      newStatus = 'EXECUTED';
+      const allApproved = await hasAllApprovals(c.env, id, req.sport);
+      newStatus = allApproved ? 'EXECUTED' : 'PENDING_APPROVAL';
       await c.env.DB.prepare('UPDATE insurance_requests SET status = ? WHERE id = ?')
         .bind(newStatus, id).run();
+      if (allApproved) {
+        const d = await loadRequestEmailData(c.env, id);
+        if (d) { d.status = newStatus; await notifyExecuted(c.env, d); }
+      }
     }
 
     results.push({ id, status: newStatus });
@@ -1060,18 +1048,22 @@ async function runReminders(env: Env): Promise<void> {
   const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
 
   const { results } = await env.DB.prepare(`
-    SELECT ir.id, ir.student_name, ir.rocket_number, ir.sport, sp.name as sportName,
-           ir.term, ir.premium_cost, ir.status, ir.coach_email, ir.coach_name,
-           sa.email as adminEmail, sa.name as adminName
+    SELECT ir.id, ir.student_name, ir.rocket_number, ir.student_email, ir.sport, sp.name as sportName,
+           ir.term, ir.premium_cost, ir.funding_source, ir.status, ir.coach_email, ir.coach_name,
+           sa.email as adminEmail, sa.name as adminName,
+           EXISTS(SELECT 1 FROM signatures s WHERE s.request_id = ir.id AND s.signatory_role = 'SPORT_ADMIN') as sportAdminSigned,
+           EXISTS(SELECT 1 FROM signatures s WHERE s.request_id = ir.id AND s.signatory_role = 'CFO') as cfoSigned
     FROM insurance_requests ir
     LEFT JOIN sports_programs sp ON ir.sport = sp.id
     LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
-    WHERE ir.status IN ('PENDING_SPORT_ADMIN', 'PENDING_CFO')
+    WHERE ir.status = 'PENDING_APPROVAL'
       AND ir.created_at < ?
   `).bind(cutoff).all<{
-    id: string; student_name: string; rocket_number: string; sport: string; sportName: string;
-    term: string; premium_cost: number; status: string; coach_email: string; coach_name: string;
+    id: string; student_name: string; rocket_number: string; student_email: string | null;
+    sport: string; sportName: string; term: string; premium_cost: number; funding_source: string;
+    status: string; coach_email: string; coach_name: string;
     adminEmail: string | null; adminName: string | null;
+    sportAdminSigned: number; cfoSigned: number;
   }>();
 
   for (const r of results) {
@@ -1087,19 +1079,23 @@ async function runReminders(env: Env): Promise<void> {
     const emailData = {
       studentName: r.student_name,
       rocketNumber: r.rocket_number,
+      studentEmail: r.student_email || undefined,
       sport: r.sport,
       sportName: r.sportName,
       term: r.term,
       premiumCost: r.premium_cost,
+      fundingSource: r.funding_source || 'operating_budget',
       coachName: r.coach_name,
       coachEmail: r.coach_email,
       requestId: r.id,
       status: r.status,
     };
 
-    if (r.status === 'PENDING_SPORT_ADMIN' && r.adminEmail) {
+    // Remind each approver who still owes a signature
+    if (!isSoftball(r.sport) && !r.sportAdminSigned && r.adminEmail) {
       await notifyReminder(env, emailData, r.adminEmail, 'Sport Administrator');
-    } else if (r.status === 'PENDING_CFO') {
+    }
+    if (!r.cfoSigned) {
       await notifyReminder(env, emailData, env.CFO_EMAIL, 'CFO');
     }
 

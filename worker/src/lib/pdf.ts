@@ -25,6 +25,7 @@ export interface PdfFormData {
   sport: string;
   term: string;              // "Fall 2026"
   premiumCost: string;       // "$1,234.00"
+  fundingSource?: string;    // operating_budget | foundation_account
   coachName: string;
   coachEmail: string;
   submissionDeadline?: string; // "September 8, 2026"
@@ -190,10 +191,11 @@ export async function buildInsuranceFormPdf(data: PdfFormData, logoPngBytes?: Ui
   y -= 8;
 
   const deadline = data.submissionDeadline ?? 'September 8, 2026';
+  const fundingPhrase = data.fundingSource === 'foundation_account' ? 'Foundation Account' : 'operating budget';
   const acknowledgments: [string, string][] = [
     [
       'Budget Deduction Authorization',
-      'By signing this form and applying my digital signature, I acknowledge and authorize that the total cost of the student-athlete health insurance premium for the selected term will be deducted entirely from my program\'s operating budget. I understand that the central Athletics department will not cover or subsidize this expense under any circumstances.',
+      `By signing this form and applying my digital signature, I acknowledge and authorize that the total cost of the student-athlete health insurance premium for the selected term will be deducted entirely from my program's ${fundingPhrase}. I understand that the central Athletics department will not cover or subsidize this expense under any circumstances.`,
     ],
     [
       'Submission Deadline Acknowledgment',

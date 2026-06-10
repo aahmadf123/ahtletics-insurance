@@ -6,7 +6,7 @@ import { StatusBadge } from '../components/StatusBadge';
 import type { InsuranceRequest, SportProgram, RequestStatus } from '../types';
 
 const ALL_STATUSES: RequestStatus[] = [
-  'PENDING_COACH', 'PENDING_SPORT_ADMIN', 'PENDING_CFO', 'EXECUTED', 'VOIDED', 'EXPIRED',
+  'PENDING_COACH', 'PENDING_APPROVAL', 'EXECUTED', 'VOIDED', 'EXPIRED',
 ];
 
 const TERM_LABELS = ['Fall', 'Spring/Summer', 'Summer'];
@@ -60,21 +60,18 @@ export function Dashboard() {
   const showTermFilter = user?.role === 'coach' || user?.role === 'cfo' || user?.role === 'super_admin';
   const showCoachFilter = user?.role === 'cfo' || user?.role === 'super_admin';
 
-  // Determine which rows are selectable for bulk sign
+  // Determine which rows are selectable for bulk sign. Sport Admin and CFO approve
+  // in any order, so a row is selectable only while that approver's signature is missing.
   const canBulkSign = user?.role === 'coach' || user?.role === 'sport_admin' || user?.role === 'cfo' || user?.role === 'super_admin';
-  const getSelectableStatus = (): string | null => {
-    if (user?.role === 'coach') return 'PENDING_COACH';
-    if (user?.role === 'sport_admin') return 'PENDING_SPORT_ADMIN';
-    if (user?.role === 'cfo') return 'PENDING_CFO';
-    if (user?.role === 'super_admin') return null; // can sign any pending
-    return null;
-  };
 
   const isRowSelectable = (r: InsuranceRequest): boolean => {
     if (!canBulkSign) return false;
-    if (user?.role === 'super_admin') return r.status === 'PENDING_SPORT_ADMIN' || r.status === 'PENDING_CFO';
-    const expected = getSelectableStatus();
-    return expected ? r.status === expected : false;
+    if (user?.role === 'coach') return r.status === 'PENDING_COACH';
+    if (r.status !== 'PENDING_APPROVAL') return false;
+    if (user?.role === 'sport_admin') return !r.sportAdminSigned;
+    if (user?.role === 'cfo') return !r.cfoSigned;
+    if (user?.role === 'super_admin') return !r.sportAdminSigned || !r.cfoSigned;
+    return false;
   };
 
   const selectableRequests = requests.filter(isRowSelectable);

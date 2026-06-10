@@ -2,8 +2,7 @@ import type { RequestStatus } from '../types';
 
 const STATUS_LABELS: Record<RequestStatus, string> = {
   PENDING_COACH: 'Pending Coach',
-  PENDING_SPORT_ADMIN: 'Pending Sport Admin',
-  PENDING_CFO: 'Pending CFO',
+  PENDING_APPROVAL: 'Pending Approval',
   EXECUTED: 'Executed',
   VOIDED: 'Voided',
   EXPIRED: 'Expired',
