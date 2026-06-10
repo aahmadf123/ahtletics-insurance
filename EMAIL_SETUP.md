@@ -4,6 +4,17 @@ The app already contains the full notification workflow. It just needs a sending
 provider configured. **Cloudflare Workers cannot send transactional email on their own**
 (the old free MailChannels route shut down in 2024), so we use [Resend](https://resend.com).
 
+## ⚠️ Current state (test mode)
+
+- `RESEND_API_KEY` **is set** as a Worker secret.
+- **No sending domain is verified yet**, so Resend is in test mode:
+  - `FROM_EMAIL` is `onboarding@resend.dev` (Resend's shared test sender).
+  - It can **only deliver to `firas.azfar@gmail.com`** (the Resend account owner).
+  - Emails to any other address (coaches, students, sport admins) return 403 and are
+    silently dropped (logged as a `[email]` warning — they do not break the flow).
+- **To email real coaches/students/admins you MUST verify a domain** (steps below) and
+  change `FROM_EMAIL` to an address on that domain.
+
 ## What gets sent (already coded, in `worker/src/lib/email.ts`)
 
 When a coach **submits** a request:

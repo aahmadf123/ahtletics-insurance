@@ -64,22 +64,29 @@ async function sendEmail(env: Env, to: string, subject: string, html: string): P
     console.log(`[EMAIL SKIPPED — no RESEND_API_KEY] To: ${to} | Subject: ${subject}`);
     return;
   }
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${env.RESEND_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      from: `Athletics Business Office <${env.FROM_EMAIL}>`,
-      to,
-      subject,
-      html,
-    }),
-  });
-  if (!res.ok) {
-    const err = await res.text();
-    console.error(`Email send failed: ${err}`);
+  if (!to) return;
+  // Email delivery is best-effort: a provider/config problem (e.g. an unverified sending
+  // domain) must never break the approval flow or flood the logs with stack traces.
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: `Athletics Business Office <${env.FROM_EMAIL}>`,
+        to,
+        subject,
+        html,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.text().catch(() => res.statusText);
+      console.warn(`[email] send to ${to} returned ${res.status}: ${err}`);
+    }
+  } catch (e) {
+    console.warn(`[email] send to ${to} failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 

@@ -26,7 +26,11 @@
   },
   "vars": {
     "CFO_EMAIL": "firas.azfar@gmail.com",
-    "FROM_EMAIL": "noreply@athletics.utoledo.edu",
+    // TEST MODE: Resend has no verified domain yet, so the only sender that delivers is
+    // onboarding@resend.dev, and it can ONLY reach the account owner (firas.azfar@gmail.com).
+    // Once a domain is verified at resend.com/domains, change this to e.g.
+    // noreply@<your-verified-domain> to email coaches/students/admins. See EMAIL_SETUP.md.
+    "FROM_EMAIL": "onboarding@resend.dev",
     "APP_BASE_URL": "https://ahtletics-insurance.firas-azfar.workers.dev",
     "DEV_MODE": "false"
   }
