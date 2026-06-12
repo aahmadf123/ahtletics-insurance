@@ -93,11 +93,15 @@ export async function getUser(request: Request, secret: string): Promise<JWTPayl
   return verifyJWT(match[1], secret);
 }
 
+// Student health data warrants strict cookie handling (FERPA/HIPAA alignment, 3.4):
+// HttpOnly keeps the token out of JS, SameSite=Strict blocks cross-site sending, and
+// Secure restricts it to HTTPS. The SPA re-validates via same-origin /auth/me, and a
+// client-side inactivity timer signs idle users out well before the cookie expires.
 export function setAuthCookie(token: string, secure: boolean): string {
   const flags = [
     'Path=/',
     'HttpOnly',
-    'SameSite=Lax',
+    'SameSite=Strict',
     `Max-Age=${60 * 60 * 24 * 7}`, // 7 days
     secure ? 'Secure' : '',
   ].filter(Boolean).join('; ');
@@ -105,5 +109,5 @@ export function setAuthCookie(token: string, secure: boolean): string {
 }
 
 export function clearAuthCookie(): string {
-  return 'auth_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0';
+  return 'auth_token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0';
 }
