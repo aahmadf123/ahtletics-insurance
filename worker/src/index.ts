@@ -1154,6 +1154,31 @@ app.post('/api/requests/:id/resubmit', async c => {
   return json({ id: newId, status: 'PENDING_COACH', parentRequestId: id }, 201);
 });
 
+// DELETE /api/requests/bulk-delete — permanent bulk delete (Super Admin only)
+app.delete('/api/requests/bulk-delete', async c => {
+  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  if (!user) return err('Unauthorized', 401);
+  if (user.role !== 'super_admin') return err('Only Super Admin can bulk delete requests', 403);
+
+  const { ids } = await c.req.json<{ ids: string[] }>();
+  if (!ids?.length) return err('No request IDs provided');
+
+  let deleted = 0;
+  for (const id of ids) {
+    const req = await c.env.DB.prepare('SELECT id FROM insurance_requests WHERE id = ?').bind(id).first();
+    if (!req) continue;
+
+    await c.env.DB.batch([
+      c.env.DB.prepare('DELETE FROM signatures WHERE request_id = ?').bind(id),
+      c.env.DB.prepare('DELETE FROM audit_log WHERE request_id = ?').bind(id),
+      c.env.DB.prepare('DELETE FROM insurance_requests WHERE id = ?').bind(id),
+    ]);
+    deleted++;
+  }
+
+  return json({ deleted });
+});
+
 // DELETE /api/requests/:id — super_admin only (permanent delete)
 app.delete('/api/requests/:id', async c => {
   const user = await getUser(c.req.raw, c.env.JWT_SECRET);
@@ -1581,31 +1606,6 @@ app.post('/api/requests/bulk-void', async c => {
   }
 
   return json({ voided: results.length, results });
-});
-
-// DELETE /api/requests/bulk-delete — permanent bulk delete (Super Admin only)
-app.delete('/api/requests/bulk-delete', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
-  if (!user) return err('Unauthorized', 401);
-  if (user.role !== 'super_admin') return err('Only Super Admin can bulk delete requests', 403);
-
-  const { ids } = await c.req.json<{ ids: string[] }>();
-  if (!ids?.length) return err('No request IDs provided');
-
-  let deleted = 0;
-  for (const id of ids) {
-    const req = await c.env.DB.prepare('SELECT id FROM insurance_requests WHERE id = ?').bind(id).first();
-    if (!req) continue;
-
-    await c.env.DB.batch([
-      c.env.DB.prepare('DELETE FROM signatures WHERE request_id = ?').bind(id),
-      c.env.DB.prepare('DELETE FROM audit_log WHERE request_id = ?').bind(id),
-      c.env.DB.prepare('DELETE FROM insurance_requests WHERE id = ?').bind(id),
-    ]);
-    deleted++;
-  }
-
-  return json({ deleted });
 });
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
