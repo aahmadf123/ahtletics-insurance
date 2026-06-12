@@ -230,13 +230,6 @@ async function setSportAdminAssignments(env: Env, adminUserId: string, sportIds:
   }
 }
 
-async function getSportAdminAssignmentIds(env: Env, adminUserId: string): Promise<string[]> {
-  const { results } = await env.DB.prepare(
-    'SELECT sport_id FROM sport_admin_assignments WHERE admin_user_id = ?'
-  ).bind(adminUserId).all<{ sport_id: string }>();
-  return results.map(r => r.sport_id);
-}
-
 /** Build the notification payload (head coach + all sport admins) for a request. */
 async function loadRequestEmailData(env: Env, id: string): Promise<EmailData | null> {
   const r = await env.DB.prepare(`

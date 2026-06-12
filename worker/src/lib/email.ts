@@ -235,6 +235,13 @@ ${detailsTable(d)}`;
   });
 }
 
+/** Send the same message to each party individually (robust to a single bad address). */
+async function sendToAllParties(env: Env, d: EmailData, subject: string, html: string, opts: SendOptions = {}): Promise<void> {
+  for (const to of allPartyRecipients(env, d)) {
+    await sendEmail(env, to, subject, html, opts);
+  }
+}
+
 // Final confirmation once all approvals are recorded — sent to ALL parties with the
 // signed/completed PDF attached (1.6).
 export async function notifyExecuted(env: Env, d: EmailData, pdf?: EmailAttachment): Promise<void> {
@@ -242,7 +249,7 @@ export async function notifyExecuted(env: Env, d: EmailData, pdf?: EmailAttachme
   const body = `<p>This health insurance request has been fully approved and executed. The premium will be deducted from the program's ${escapeHtml(fundingSourceLabel(d.fundingSource))}.</p>
 ${detailsTable(d)}
 <p style="color:#1a7a4a;font-weight:600">✓ Enrollment is complete. The signed authorization form is attached.</p>`;
-  await sendEmail(env, allPartyRecipients(env, d), subject, emailHtml(subject, body, actionUrl(env, d.requestId)), {
+  await sendToAllParties(env, d, subject, emailHtml(subject, body, actionUrl(env, d.requestId)), {
     attachments: pdf ? [pdf] : undefined,
   });
 }
@@ -253,7 +260,7 @@ export async function notifyVoided(env: Env, d: EmailData, pdf?: EmailAttachment
 ${d.voidReason ? `<p><strong>Reason:</strong> ${escapeHtml(d.voidReason)}</p>` : ''}
 ${detailsTable(d)}
 <p>If you believe this was in error, please contact the Athletics Business Office.</p>`;
-  await sendEmail(env, allPartyRecipients(env, d), subject, emailHtml(subject, body, actionUrl(env, d.requestId)), {
+  await sendToAllParties(env, d, subject, emailHtml(subject, body, actionUrl(env, d.requestId)), {
     attachments: pdf ? [pdf] : undefined,
   });
 }
@@ -265,7 +272,7 @@ export async function notifyDenied(env: Env, d: EmailData): Promise<void> {
 ${d.denialReason ? `<p><strong>Reason for denial:</strong> ${escapeHtml(d.denialReason)}</p>` : ''}
 ${detailsTable(d)}
 <p>The requesting coach can correct the issue and resubmit from the request page.</p>`;
-  await sendEmail(env, allPartyRecipients(env, d), subject, emailHtml(subject, body, actionUrl(env, d.requestId), 'View & Resubmit'));
+  await sendToAllParties(env, d, subject, emailHtml(subject, body, actionUrl(env, d.requestId), 'View & Resubmit'));
 }
 
 export async function notifyReminder(env: Env, d: EmailData, to: string, role: string): Promise<void> {
