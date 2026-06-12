@@ -348,13 +348,15 @@ async function loadRequestEmailData(env: Env, id: string): Promise<EmailData | n
 /** Assemble the signed authorization PDF for a request. */
 async function loadPdfFormData(env: Env, id: string): Promise<PdfFormData | null> {
   const req = await env.DB.prepare(`
-    SELECT ir.rocket_number as rocketNumber, ir.student_name as studentName, ir.sport,
+    SELECT ir.id, ir.status,
+           ir.rocket_number as rocketNumber, ir.student_name as studentName, ir.sport,
            ir.term, ir.premium_cost as premiumCost, ir.funding_source as fundingSource,
            ir.coach_name as coachName, ir.coach_email as coachEmail, sp.name as sportName
     FROM insurance_requests ir
     LEFT JOIN sports_programs sp ON ir.sport = sp.id
     WHERE ir.id = ?
   `).bind(id).first<{
+    id: string; status: string;
     rocketNumber: string; studentName: string; sport: string; term: string;
     premiumCost: number; fundingSource: string; coachName: string; coachEmail: string; sportName: string | null;
   }>();
@@ -364,6 +366,8 @@ async function loadPdfFormData(env: Env, id: string): Promise<PdfFormData | null
     FROM signatures WHERE request_id = ? ORDER BY timestamp ASC
   `).bind(id).all<{ role: string; name: string; timestamp: string }>();
   return {
+    requestId: req.id,
+    status: req.status,
     studentName: req.studentName,
     rocketNumber: req.rocketNumber,
     sport: req.sportName ?? req.sport,
@@ -371,7 +375,7 @@ async function loadPdfFormData(env: Env, id: string): Promise<PdfFormData | null
     premiumCost: `$${req.premiumCost.toFixed(2)}`,
     fundingSource: req.fundingSource,
     coachName: req.coachName,
-    coachEmail: req.coachEmail,
+    coachEmail: req.coachEmail ?? '',
     submissionDeadline: getSubmissionDeadline(req.term),
     signatures: sigs.map(s => ({
       role: s.role as 'COACH' | 'SPORT_ADMIN' | 'CFO',
@@ -381,12 +385,25 @@ async function loadPdfFormData(env: Env, id: string): Promise<PdfFormData | null
   };
 }
 
+/** Fetch the white-on-transparent rocket logo from the ASSETS binding for embedding in PDFs. */
+async function loadLogoPng(env: Env): Promise<Uint8Array | undefined> {
+  try {
+    const origin = env.APP_BASE_URL.replace(/\/$/, '');
+    const res = await env.ASSETS.fetch(new Request(`${origin}/logo-dark.png`));
+    if (!res.ok) return undefined;
+    return new Uint8Array(await res.arrayBuffer());
+  } catch {
+    return undefined;
+  }
+}
+
 /** Build the base64 PDF email attachment for a completed request (1.6). */
 async function buildRequestPdfAttachment(env: Env, id: string): Promise<EmailAttachment | undefined> {
   const data = await loadPdfFormData(env, id);
   if (!data) return undefined;
   try {
-    const bytes = await buildInsuranceFormPdf(data);
+    const logo  = await loadLogoPng(env);
+    const bytes = await buildInsuranceFormPdf(data, logo);
     return {
       filename: `insurance-request-${safeFilePart(data.rocketNumber)}-${safeFilePart(data.term)}.pdf`,
       content: bytesToBase64(bytes),
@@ -1004,7 +1021,8 @@ app.get('/api/requests/:id/pdf', async c => {
   const pdfData = await loadPdfFormData(c.env, id);
   if (!pdfData) return err('Not found', 404);
 
-  const pdfBytes = await buildInsuranceFormPdf(pdfData);
+  const logo     = await loadLogoPng(c.env);
+  const pdfBytes = await buildInsuranceFormPdf(pdfData, logo);
 
   const filename = `insurance-auth-${safeFilePart(pdfData.rocketNumber)}-${safeFilePart(pdfData.term)}.pdf`;
   return new Response(pdfBytes, {
