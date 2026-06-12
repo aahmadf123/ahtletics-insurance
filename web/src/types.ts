@@ -127,6 +127,8 @@ export interface BulkSubmitPayload {
   sport: string;
   fundingSource: FundingSource;
   coachEmail?: string;
+  coachName?: string;
+  parentRequestId?: string;
 }
 
 export interface ReportRow {

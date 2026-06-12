@@ -1,17 +1,17 @@
-import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../lib/auth';
-import { listSports, submitRequest } from '../../lib/api';
+import { listSports, listSportCoaches, submitRequest, bulkImportRequests, type BulkImportRow } from '../../lib/api';
 import { PremiumDisplay } from '../../components/PremiumDisplay';
 import { DisclaimerCheckboxes } from '../../components/DisclaimerCheckboxes';
 import { TERM_OPTIONS } from '../../types';
-import type { SportProgram, AthleteEntry, FundingSource } from '../../types';
+import type { SportProgram, Coach, AthleteEntry, FundingSource, RequestDetail } from '../../types';
 
 const CURRENT_YEAR = new Date().getFullYear();
 
 const TERMS = TERM_OPTIONS.map(t => ({
-  value: `${t.label} ${t.label === 'Fall' ? CURRENT_YEAR : CURRENT_YEAR + 1}`,
-  label: `${t.label} ${t.label === 'Fall' ? CURRENT_YEAR : CURRENT_YEAR + 1}`,
+  value: `${t.label} ${t.label === 'Fall' || t.label === 'Full Year' ? CURRENT_YEAR : CURRENT_YEAR + 1}`,
+  label: `${t.label} ${t.label === 'Fall' || t.label === 'Full Year' ? CURRENT_YEAR : CURRENT_YEAR + 1}`,
   premium: t.premium,
   termKey: t.label,
   deadline: t.deadline,
@@ -33,31 +33,127 @@ function validateEmail(val: string): string {
   return '';
 }
 
+// ── Minimal CSV parser (handles quoted fields, commas, CRLF) ──────────────────
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; } else inQuotes = false;
+      } else field += ch;
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      row.push(field); field = '';
+    } else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); field = '';
+      if (row.some(c => c.trim() !== '')) rows.push(row);
+      row = [];
+    } else field += ch;
+  }
+  if (field !== '' || row.length) { row.push(field); if (row.some(c => c.trim() !== '')) rows.push(row); }
+  return rows;
+}
+
+interface ParsedAthlete {
+  studentName: string;
+  rocketNumber: string;
+  email: string;
+  error?: string;
+}
+
+function rowsToAthletes(rows: string[][]): ParsedAthlete[] {
+  if (rows.length === 0) return [];
+  const header = rows[0].map(h => h.trim().toLowerCase().replace(/\s+/g, '_'));
+  const col = (...names: string[]) => header.findIndex(h => names.includes(h));
+  const iName = col('student_name', 'name', 'full_name', 'athlete');
+  const iFirst = col('first_name', 'first');
+  const iLast = col('last_name', 'last');
+  const iRocket = col('rocket_number', 'rocket', 'rocket_#', 'student_id', 'ut_id');
+  const iEmail = col('email', 'student_email');
+
+  return rows.slice(1).map(r => {
+    const name = iName >= 0
+      ? (r[iName] ?? '').trim()
+      : `${(r[iFirst] ?? '').trim()} ${(r[iLast] ?? '').trim()}`.trim();
+    const rocketNumber = (iRocket >= 0 ? (r[iRocket] ?? '') : '').trim().toUpperCase();
+    const email = (iEmail >= 0 ? (r[iEmail] ?? '') : '').trim();
+    let error = '';
+    if (!name) error = 'Missing name';
+    else if (!/^R\d{8}$/.test(rocketNumber)) error = `Invalid Rocket # (${rocketNumber || 'blank'})`;
+    else if (email && !EMAIL_RE.test(email)) error = 'Invalid email';
+    return { studentName: name, rocketNumber, email, error };
+  });
+}
+
 export function NewRequest() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const resubmit = (location.state as { resubmit?: RequestDetail & { parentRequestId?: string } } | null)?.resubmit;
 
   const [sports, setSports] = useState<SportProgram[]>([]);
   const [term, setTerm] = useState('');
   const [sport, setSport] = useState('');
   const [fundingSource, setFundingSource] = useState<FundingSource>('operating_budget');
+  const [coaches, setCoaches] = useState<Coach[]>([]);
+  const [coachId, setCoachId] = useState('');
+  const [coachName, setCoachName] = useState('');
   const [coachEmail, setCoachEmail] = useState('');
+  const [mode, setMode] = useState<'manual' | 'bulk'>('manual');
   const [athletes, setAthletes] = useState<AthleteEntry[]>([emptyAthlete()]);
+  const [csvAthletes, setCsvAthletes] = useState<ParsedAthlete[]>([]);
+  const [csvFileName, setCsvFileName] = useState('');
   const [allAcknowledged, setAllAcknowledged] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [bulkSummary, setBulkSummary] = useState<string>('');
 
   useEffect(() => {
     listSports().then(setSports).catch(console.error);
   }, []);
 
-  if (user?.role !== 'coach') {
-    return <div className="page"><p className="error">Only coaches can submit requests.</p></div>;
-  }
+  // Prefill from a denied request being fixed & resubmitted (1.5).
+  useEffect(() => {
+    if (!resubmit) return;
+    setSport(resubmit.sport);
+    setTerm(resubmit.term);
+    setFundingSource((resubmit.fundingSource as FundingSource) ?? 'operating_budget');
+    setCoachName(resubmit.coachName ?? '');
+    setCoachEmail(resubmit.coachEmail ?? '');
+    const parts = (resubmit.studentName ?? '').split(' ');
+    setAthletes([{
+      firstName: parts[0] ?? '',
+      lastName: parts.slice(1).join(' '),
+      rocketNumber: resubmit.rocketNumber ?? '',
+      email: resubmit.studentEmail ?? '',
+    }]);
+  }, [resubmit]);
+
+  // Load the registered coaches for the chosen sport so the coach can pick their name (1.2).
+  useEffect(() => {
+    if (!sport) { setCoaches([]); return; }
+    listSportCoaches(sport)
+      .then(list => {
+        setCoaches(list);
+        // Auto-select when the resubmit data matches a registered coach.
+        const match = list.find(co => co.displayName === coachName || co.email === coachEmail);
+        if (match) { setCoachId(match.id); setCoachName(match.displayName); setCoachEmail(match.email); }
+      })
+      .catch(() => setCoaches([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sport]);
 
   const selectedTerm = TERMS.find(t => t.value === term);
   const year = selectedTerm ? selectedTerm.value.split(' ').pop() : '';
   const deadline = selectedTerm ? `${selectedTerm.deadline}, ${year}` : '';
+  const selectedSport = sports.find(s => s.id === sport);
+  const premium = selectedTerm?.premium ?? 0;
 
   const updateAthlete = (index: number, field: keyof AthleteEntry, value: string) => {
     setAthletes(prev => prev.map((a, i) => {
@@ -69,65 +165,117 @@ export function NewRequest() {
     }));
   };
 
-  // When a sport is picked, pre-fill the coach email the Super Admin maintains for that
-  // program (coach can still override it).
   const selectSport = (sportId: string) => {
     setSport(sportId);
-    const picked = sports.find(s => s.id === sportId);
-    if (picked?.headCoachEmail) setCoachEmail(picked.headCoachEmail);
+    setCoachId(''); setCoachName(''); setCoachEmail('');
   };
 
-  const selectedSport = sports.find(s => s.id === sport);
+  const selectCoach = (id: string) => {
+    setCoachId(id);
+    const picked = coaches.find(co => co.id === id);
+    if (picked) { setCoachName(picked.displayName); setCoachEmail(picked.email); }
+    else { setCoachName(''); setCoachEmail(''); }
+  };
 
   const addAthlete = () => setAthletes(prev => [...prev, emptyAthlete()]);
-
   const removeAthlete = (index: number) => {
     if (athletes.length === 1) return;
     setAthletes(prev => prev.filter((_, i) => i !== index));
   };
 
-  const coachEmailError = validateEmail(coachEmail);
-  const athletesValid = athletes.every(
+  const handleCsvFile = async (file: File) => {
+    setCsvFileName(file.name);
+    setError('');
+    const text = await file.text();
+    const parsed = rowsToAthletes(parseCsv(text));
+    if (parsed.length === 0) setError('No data rows found in the CSV. Expected a header row plus one row per athlete.');
+    setCsvAthletes(parsed);
+  };
+
+  // Identity is satisfied either by picking a registered coach, or — when a sport has no
+  // coaches on file yet — by typing a name + valid email as a fallback.
+  const hasRegisteredCoaches = coaches.length > 0;
+  const coachIdentityValid = hasRegisteredCoaches ? !!coachId : (!!coachName.trim() && EMAIL_RE.test(coachEmail));
+  const coachEmailError = !hasRegisteredCoaches ? validateEmail(coachEmail) : '';
+
+  const athleteCount = mode === 'bulk' ? csvAthletes.filter(a => !a.error).length : athletes.length;
+
+  const manualValid = athletes.every(
     a => a.firstName.trim() && a.lastName.trim() && /^R\d{8}$/.test(a.rocketNumber) && !a.rocketError && !a.emailError
   );
-  const canSubmit = term && sport && athletesValid && allAcknowledged && !coachEmailError;
+  const bulkValid = csvAthletes.length > 0 && csvAthletes.some(a => !a.error);
+  const athletesValid = mode === 'bulk' ? bulkValid : manualValid;
+  const canSubmit = !!term && !!sport && coachIdentityValid && athletesValid && allAcknowledged && !submitting;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canSubmit) return;
     setSubmitting(true);
     setError('');
+    setBulkSummary('');
     try {
-      const results = await submitRequest({
-        athletes: athletes.map(a => ({
-          studentName: `${a.firstName.trim()} ${a.lastName.trim()}`,
+      if (mode === 'bulk') {
+        const rows: BulkImportRow[] = csvAthletes.filter(a => !a.error).map(a => ({
+          studentName: a.studentName,
           rocketNumber: a.rocketNumber,
-          email: a.email.trim() || undefined,
-        })),
-        term,
-        sport,
-        fundingSource,
-        coachEmail: coachEmail.trim() || undefined,
-      });
-      if (results.length === 1) {
-        navigate(`/request/${results[0].id}`);
-      } else {
+          email: a.email || undefined,
+          sport,
+          term,
+          fundingSource,
+          coachName: coachName.trim() || undefined,
+          coachEmail: coachEmail.trim() || undefined,
+        }));
+        const result = await bulkImportRequests(rows);
+        if (result.skippedCount > 0) {
+          setBulkSummary(`${result.submitted} submitted, ${result.skippedCount} skipped (${result.skipped.map(s => `${s.studentName}: ${s.reason}`).join('; ')})`);
+          setSubmitting(false);
+          if (result.submitted > 0) setTimeout(() => navigate('/dashboard'), 4000);
+          return;
+        }
         navigate('/dashboard');
+      } else {
+        const results = await submitRequest({
+          athletes: athletes.map(a => ({
+            studentName: `${a.firstName.trim()} ${a.lastName.trim()}`,
+            rocketNumber: a.rocketNumber,
+            email: a.email.trim() || undefined,
+          })),
+          term,
+          sport,
+          fundingSource,
+          coachName: coachName.trim() || undefined,
+          coachEmail: coachEmail.trim() || undefined,
+          parentRequestId: resubmit?.parentRequestId,
+        });
+        if (results.length === 1) navigate(`/request/${results[0].id}`);
+        else navigate('/dashboard');
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Submission failed');
-    } finally {
       setSubmitting(false);
     }
   };
+
+  const csvValidCount = useMemo(() => csvAthletes.filter(a => !a.error).length, [csvAthletes]);
+
+  if (user?.role !== 'coach') {
+    return <div className="page"><p className="error">Only coaches can submit requests.</p></div>;
+  }
 
   return (
     <div className="page">
       <h1>New Insurance Request</h1>
       <p className="page-subtitle">
-        Complete all fields below. After submission, you will be prompted to sign the request(s).
-        The request will then be routed to the Sport Administrator and CFO for approval.
+        Complete all fields below. After submission, the request is routed to the Head Coach for approval,
+        then to the Sport Administrator and CFO.
       </p>
+
+      {resubmit && (
+        <div className="action-zone" style={{ marginTop: 0, marginBottom: '1rem' }}>
+          <strong>Resubmitting a denied request.</strong> Correct the issue below and submit — the new
+          request will be linked to the original for the audit trail.
+        </div>
+      )}
 
       <form className="form-card" onSubmit={handleSubmit}>
         <fieldset className="fieldset">
@@ -135,33 +283,56 @@ export function NewRequest() {
           <div className="athlete-row-fields">
             <div className="field">
               <label>Sport *</label>
-              <select
-                value={sport}
-                onChange={e => selectSport(e.target.value)}
-                required
-              >
+              <select value={sport} onChange={e => selectSport(e.target.value)} required>
                 <option value="">Select a sport…</option>
                 {sports.map(s => (
                   <option key={s.id} value={s.id}>{s.name} ({s.gender})</option>
                 ))}
               </select>
-              {selectedSport?.headCoach && (
-                <span className="field-hint">Head Coach: {selectedSport.headCoach}</span>
+            </div>
+            <div className="field">
+              <label>Your Name *</label>
+              {hasRegisteredCoaches ? (
+                <select value={coachId} onChange={e => selectCoach(e.target.value)} required disabled={!sport}>
+                  <option value="">Select your name…</option>
+                  {coaches.map(co => (
+                    <option key={co.id} value={co.id}>
+                      {co.displayName}{co.isHeadCoach ? ' (Head Coach)' : co.title ? ` (${co.title})` : ''}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={coachName}
+                  onChange={e => setCoachName(e.target.value)}
+                  placeholder={sport ? 'Your full name' : 'Select a sport first'}
+                  disabled={!sport}
+                  maxLength={150}
+                />
+              )}
+              {sport && !hasRegisteredCoaches && (
+                <span className="field-hint">No coaches are on file for this sport yet — enter your name and email.</span>
               )}
             </div>
             <div className="field">
-              <label>Coach Email (optional)</label>
+              <label>Coach Email{hasRegisteredCoaches ? '' : ' *'}</label>
               <input
                 type="email"
                 value={coachEmail}
                 onChange={e => setCoachEmail(e.target.value)}
                 placeholder="you@utoledo.edu"
                 maxLength={200}
+                readOnly={hasRegisteredCoaches && !!coachId}
               />
               {coachEmailError && <span className="field-error">{coachEmailError}</span>}
-              <span className="field-hint">We'll email you a confirmation and the final approval notice.</span>
             </div>
           </div>
+          {selectedSport?.headCoach && (
+            <span className="field-hint">
+              Head Coach for {selectedSport.name}: {selectedSport.headCoach} — they will receive the approval request.
+            </span>
+          )}
         </fieldset>
 
         {/* Funding source */}
@@ -172,23 +343,13 @@ export function NewRequest() {
           </p>
           <div className="radio-group">
             <label className={`radio-option ${fundingSource === 'operating_budget' ? 'radio-option--checked' : ''}`}>
-              <input
-                type="radio"
-                name="fundingSource"
-                value="operating_budget"
-                checked={fundingSource === 'operating_budget'}
-                onChange={() => setFundingSource('operating_budget')}
-              />
+              <input type="radio" name="fundingSource" value="operating_budget"
+                checked={fundingSource === 'operating_budget'} onChange={() => setFundingSource('operating_budget')} />
               <span>Operating Budget</span>
             </label>
             <label className={`radio-option ${fundingSource === 'foundation_account' ? 'radio-option--checked' : ''}`}>
-              <input
-                type="radio"
-                name="fundingSource"
-                value="foundation_account"
-                checked={fundingSource === 'foundation_account'}
-                onChange={() => setFundingSource('foundation_account')}
-              />
+              <input type="radio" name="fundingSource" value="foundation_account"
+                checked={fundingSource === 'foundation_account'} onChange={() => setFundingSource('foundation_account')} />
               <span>Foundation Account</span>
             </label>
           </div>
@@ -201,101 +362,104 @@ export function NewRequest() {
             <label>Term *</label>
             <select value={term} onChange={e => setTerm(e.target.value)} required>
               <option value="">Select a term…</option>
-              {TERMS.map(t => (
-                <option key={t.value} value={t.value}>{t.label}</option>
-              ))}
+              {TERMS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
             </select>
           </div>
           {selectedTerm && (
-            <PremiumDisplay
-              term={term}
-              premium={selectedTerm.premium}
-              athleteCount={athletes.length}
-              fundingSource={fundingSource}
-            />
+            <PremiumDisplay term={term} premium={premium} athleteCount={Math.max(1, athleteCount)} fundingSource={fundingSource} />
           )}
         </fieldset>
 
-        {/* Athlete rows */}
+        {/* Mode toggle: manual vs bulk CSV (2.2) */}
         <fieldset className="fieldset">
-          <legend>Student-Athletes ({athletes.length})</legend>
+          <legend>Student-Athletes</legend>
+          <div className="radio-group" style={{ marginBottom: '1rem' }}>
+            <label className={`radio-option ${mode === 'manual' ? 'radio-option--checked' : ''}`}>
+              <input type="radio" name="mode" checked={mode === 'manual'} onChange={() => setMode('manual')} />
+              <span>Enter manually</span>
+            </label>
+            <label className={`radio-option ${mode === 'bulk' ? 'radio-option--checked' : ''}`}>
+              <input type="radio" name="mode" checked={mode === 'bulk'} onChange={() => setMode('bulk')} />
+              <span>Bulk Import (CSV)</span>
+            </label>
+          </div>
 
-          {athletes.map((athlete, index) => (
-            <div key={index} className="athlete-row">
-              <div className="athlete-row-header">
-                <span className="athlete-index">Athlete #{index + 1}</span>
-                {athletes.length > 1 && (
-                  <button
-                    type="button"
-                    className="btn-remove"
-                    onClick={() => removeAthlete(index)}
-                    aria-label="Remove athlete"
-                  >
-                    ✕ Remove
-                  </button>
-                )}
-              </div>
-
-              <div className="athlete-row-fields">
-                <div className="field">
-                  <label>First Name *</label>
-                  <input
-                    type="text"
-                    value={athlete.firstName}
-                    onChange={e => updateAthlete(index, 'firstName', e.target.value)}
-                    placeholder="First name"
-                    required
-                    maxLength={100}
-                  />
+          {mode === 'manual' ? (
+            <>
+              {athletes.map((athlete, index) => (
+                <div key={index} className="athlete-row">
+                  <div className="athlete-row-header">
+                    <span className="athlete-index">Athlete #{index + 1}</span>
+                    {athletes.length > 1 && (
+                      <button type="button" className="btn-remove" onClick={() => removeAthlete(index)} aria-label="Remove athlete">
+                        ✕ Remove
+                      </button>
+                    )}
+                  </div>
+                  <div className="athlete-row-fields">
+                    <div className="field">
+                      <label>First Name *</label>
+                      <input type="text" value={athlete.firstName}
+                        onChange={e => updateAthlete(index, 'firstName', e.target.value)} placeholder="First name" required maxLength={100} />
+                    </div>
+                    <div className="field">
+                      <label>Last Name *</label>
+                      <input type="text" value={athlete.lastName}
+                        onChange={e => updateAthlete(index, 'lastName', e.target.value)} placeholder="Last name" required maxLength={100} />
+                    </div>
+                    <div className="field">
+                      <label>Rocket Number *</label>
+                      <input type="text" value={athlete.rocketNumber}
+                        onChange={e => updateAthlete(index, 'rocketNumber', e.target.value)} placeholder="R12345678" required maxLength={9} />
+                      {athlete.rocketError && <span className="field-error">{athlete.rocketError}</span>}
+                    </div>
+                    <div className="field">
+                      <label>Student Email (optional)</label>
+                      <input type="email" value={athlete.email}
+                        onChange={e => updateAthlete(index, 'email', e.target.value)} placeholder="student@rockets.utoledo.edu" maxLength={200} />
+                      {athlete.emailError && <span className="field-error">{athlete.emailError}</span>}
+                    </div>
+                  </div>
                 </div>
-
-                <div className="field">
-                  <label>Last Name *</label>
-                  <input
-                    type="text"
-                    value={athlete.lastName}
-                    onChange={e => updateAthlete(index, 'lastName', e.target.value)}
-                    placeholder="Last name"
-                    required
-                    maxLength={100}
-                  />
+              ))}
+              <button type="button" className="btn btn-secondary btn-add-athlete" onClick={addAthlete}>
+                + Add Another Athlete
+              </button>
+            </>
+          ) : (
+            <div className="athlete-row">
+              <p className="field-hint" style={{ marginBottom: '.75rem' }}>
+                Upload a CSV with columns: <code>student_name</code> (or <code>first_name</code>,&nbsp;
+                <code>last_name</code>), <code>rocket_number</code>, and optional <code>email</code>.
+                The Sport, Term, and Funding Source selected above apply to every athlete.
+              </p>
+              <label className="btn btn-secondary" style={{ cursor: 'pointer' }}>
+                {csvFileName || 'Choose CSV file…'}
+                <input type="file" accept=".csv,text/csv" style={{ display: 'none' }}
+                  onChange={e => { const f = e.target.files?.[0]; if (f) handleCsvFile(f); }} />
+              </label>
+              {csvAthletes.length > 0 && (
+                <div className="table-wrapper" style={{ marginTop: '1rem' }}>
+                  <p className="field-hint">{csvValidCount} of {csvAthletes.length} rows valid and ready to submit.</p>
+                  <table className="data-table">
+                    <thead><tr><th>Student-Athlete</th><th>Rocket #</th><th>Email</th><th>Status</th></tr></thead>
+                    <tbody>
+                      {csvAthletes.map((a, i) => (
+                        <tr key={i} style={a.error ? { background: '#fff5f5' } : undefined}>
+                          <td>{a.studentName || '—'}</td>
+                          <td><code>{a.rocketNumber || '—'}</code></td>
+                          <td>{a.email || '—'}</td>
+                          <td>{a.error
+                            ? <span className="badge badge--voided">{a.error}</span>
+                            : <span className="badge badge--executed">Ready</span>}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-
-                <div className="field">
-                  <label>Rocket Number *</label>
-                  <input
-                    type="text"
-                    value={athlete.rocketNumber}
-                    onChange={e => updateAthlete(index, 'rocketNumber', e.target.value)}
-                    placeholder="R12345678"
-                    required
-                    maxLength={9}
-                  />
-                  {athlete.rocketError && (
-                    <span className="field-error">{athlete.rocketError}</span>
-                  )}
-                </div>
-
-                <div className="field">
-                  <label>Student Email (optional)</label>
-                  <input
-                    type="email"
-                    value={athlete.email}
-                    onChange={e => updateAthlete(index, 'email', e.target.value)}
-                    placeholder="student@rockets.utoledo.edu"
-                    maxLength={200}
-                  />
-                  {athlete.emailError && (
-                    <span className="field-error">{athlete.emailError}</span>
-                  )}
-                </div>
-              </div>
+              )}
             </div>
-          ))}
-
-          <button type="button" className="btn btn-secondary btn-add-athlete" onClick={addAthlete}>
-            + Add Another Athlete
-          </button>
+          )}
         </fieldset>
 
         {/* Disclaimer checkboxes */}
@@ -305,17 +469,16 @@ export function NewRequest() {
         </fieldset>
 
         {error && <p className="error">{error}</p>}
+        {bulkSummary && <p className="success" style={{ color: '#16a34a', fontWeight: 600 }}>{bulkSummary}</p>}
 
-        <button
-          type="submit"
-          className="btn btn-primary btn-full"
-          disabled={!canSubmit || submitting}
-        >
+        <button type="submit" className="btn btn-primary btn-full" disabled={!canSubmit}>
           {submitting
             ? 'Submitting…'
-            : athletes.length > 1
-              ? `Submit ${athletes.length} Requests`
-              : 'Submit Request'}
+            : mode === 'bulk'
+              ? `Submit ${csvValidCount} Request${csvValidCount !== 1 ? 's' : ''}`
+              : athletes.length > 1
+                ? `Submit ${athletes.length} Requests`
+                : 'Submit Request'}
         </button>
       </form>
     </div>
