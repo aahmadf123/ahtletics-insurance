@@ -15,6 +15,7 @@ import { Reports } from './pages/Reports';
 import { AuditLog } from './pages/AuditLog';
 import { AdminUsers } from './pages/admin/Users';
 import { AdminSports } from './pages/admin/Sports';
+import { AdminSettingsPage } from './pages/admin/Settings';
 import { SessionTimeout } from './components/SessionTimeout';
 
 function Nav({ user, onLogout }: { user: User; onLogout: () => void }) {
@@ -32,6 +33,7 @@ function Nav({ user, onLogout }: { user: User; onLogout: () => void }) {
         {(user.role === 'cfo' || user.role === 'super_admin') && <Link to="/audit">Audit Log</Link>}
         {(user.role === 'cfo' || user.role === 'super_admin') && <Link to="/admin/users">Users</Link>}
         {user.role === 'super_admin' && <Link to="/admin/sports">Sports &amp; Coaches</Link>}
+        {user.role === 'super_admin' && <Link to="/admin/settings">Settings</Link>}
       </div>
       <div className="navbar-user">
         <span className="navbar-name">{user.name}</span>
@@ -108,6 +110,9 @@ function AppLayout() {
           } />
           <Route path="/admin/sports" element={
             !user ? <Navigate to="/login" replace /> : <AdminSports />
+          } />
+          <Route path="/admin/settings" element={
+            !user ? <Navigate to="/login" replace /> : <AdminSettingsPage />
           } />
           <Route path="/" element={<Navigate to={user ? '/dashboard' : '/login'} replace />} />
           <Route path="*" element={<Navigate to={user ? '/dashboard' : '/login'} replace />} />

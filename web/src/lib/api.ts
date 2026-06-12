@@ -119,6 +119,27 @@ export function bulkSignRequests(ids: string[], coachName?: string) {
   });
 }
 
+export function bulkDenyRequests(ids: string[], reason: string) {
+  return request<{ denied: number; results: { id: string; status: string }[] }>('/api/requests/bulk-deny', {
+    method: 'POST',
+    body: JSON.stringify({ ids, reason }),
+  });
+}
+
+export function bulkVoidRequests(ids: string[], reason: string) {
+  return request<{ voided: number; results: { id: string; status: string }[] }>('/api/requests/bulk-void', {
+    method: 'POST',
+    body: JSON.stringify({ ids, reason }),
+  });
+}
+
+export function bulkDeleteRequests(ids: string[]) {
+  return request<{ deleted: number }>('/api/requests/bulk-delete', {
+    method: 'DELETE',
+    body: JSON.stringify({ ids }),
+  });
+}
+
 export function getRequestPdfUrl(id: string) {
   return `/api/requests/${id}/pdf`;
 }
@@ -242,6 +263,24 @@ export function getAuditCsvUrl(params?: Record<string, string>) {
   const clean = params ? Object.fromEntries(Object.entries(params).filter(([, v]) => v)) : {};
   const qs = Object.keys(clean).length ? '?' + new URLSearchParams(clean).toString() : '';
   return `/api/audit/csv${qs}`;
+}
+
+// Admin — system settings (Super Admin)
+export interface AdminSettings {
+  fromName: string;
+  fromEmail: string;
+  appBaseUrl: string;
+}
+
+export function getAdminSettings() {
+  return request<AdminSettings>('/api/admin/settings');
+}
+
+export function updateAdminSettings(data: AdminSettings) {
+  return request<{ ok: boolean } & AdminSettings>('/api/admin/settings', {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
 }
 
 // Admin — users

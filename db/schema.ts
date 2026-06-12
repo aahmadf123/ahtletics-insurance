@@ -106,3 +106,11 @@ export const auditLog = sqliteTable("audit_log", {
   ipAddress: text("ip_address"), // captured for the compliance audit-log viewer (3.3)
   timestamp: text("timestamp").default(sql`CURRENT_TIMESTAMP`),
 });
+
+// ─── App Settings ────────────────────────────────────────────────────────────
+
+export const appSettings = sqliteTable("app_settings", {
+  settingKey: text("setting_key").primaryKey(),
+  settingValue: text("setting_value").notNull(),
+  updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
+});

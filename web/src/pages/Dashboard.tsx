@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
-import { listRequests, listSports, bulkSignRequests } from '../lib/api';
+import { listRequests, listSports, bulkSignRequests, bulkDenyRequests, bulkVoidRequests, bulkDeleteRequests } from '../lib/api';
 import { StatusBadge } from '../components/StatusBadge';
 import type { InsuranceRequest, SportProgram, RequestStatus } from '../types';
 
@@ -31,6 +31,7 @@ export function Dashboard() {
   // Bulk selection
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkSigning, setBulkSigning] = useState(false);
+  const [bulkActing, setBulkActing] = useState(false);
 
   useEffect(() => {
     listSports().then(setSports).catch(console.error);
@@ -60,11 +61,13 @@ export function Dashboard() {
   const showTermFilter = user?.role === 'coach' || user?.role === 'cfo' || user?.role === 'super_admin';
   const showCoachFilter = user?.role === 'cfo' || user?.role === 'super_admin';
 
-  // Determine which rows are selectable for bulk sign. Sport Admin and CFO approve
-  // in any order, so a row is selectable only while that approver's signature is missing.
+  // Determine role-based bulk actions.
   const canBulkSign = user?.role === 'coach' || user?.role === 'sport_admin' || user?.role === 'cfo' || user?.role === 'super_admin';
+  const canBulkDeny = user?.role === 'coach' || user?.role === 'sport_admin' || user?.role === 'cfo' || user?.role === 'super_admin';
+  const canBulkVoid = user?.role === 'super_admin';
+  const canBulkDelete = user?.role === 'super_admin';
 
-  const isRowSelectable = (r: InsuranceRequest): boolean => {
+  const isApprovable = (r: InsuranceRequest): boolean => {
     if (!canBulkSign) return false;
     if (user?.role === 'coach') return r.status === 'PENDING_COACH';
     if (r.status !== 'PENDING_APPROVAL') return false;
@@ -72,6 +75,23 @@ export function Dashboard() {
     if (user?.role === 'cfo') return !r.cfoSigned;
     if (user?.role === 'super_admin') return !r.sportAdminSigned || !r.cfoSigned;
     return false;
+  };
+
+  const isDeniable = (r: InsuranceRequest): boolean => {
+    if (!canBulkDeny) return false;
+    if (user?.role === 'coach') return r.status === 'PENDING_COACH';
+    if (user?.role === 'sport_admin' || user?.role === 'cfo') return r.status === 'PENDING_APPROVAL';
+    if (user?.role === 'super_admin') return r.status === 'PENDING_COACH' || r.status === 'PENDING_APPROVAL';
+    return false;
+  };
+
+  const isVoidable = (r: InsuranceRequest): boolean =>
+    !!canBulkVoid && (r.status === 'PENDING_COACH' || r.status === 'PENDING_APPROVAL');
+
+  const isDeletable = (r: InsuranceRequest): boolean => !!canBulkDelete;
+
+  const isRowSelectable = (r: InsuranceRequest): boolean => {
+    return isApprovable(r) || isDeniable(r) || isVoidable(r) || isDeletable(r);
   };
 
   const selectableRequests = requests.filter(isRowSelectable);
@@ -119,6 +139,68 @@ export function Dashboard() {
       setError(err instanceof Error ? err.message : 'Bulk sign failed');
     } finally {
       setBulkSigning(false);
+    }
+  };
+
+  const selectedRequests = requests.filter(r => selectedIds.has(r.id));
+  const selectedApprovableIds = selectedRequests.filter(isApprovable).map(r => r.id);
+  const selectedDeniableIds = selectedRequests.filter(isDeniable).map(r => r.id);
+  const selectedVoidableIds = selectedRequests.filter(isVoidable).map(r => r.id);
+  const selectedDeletableIds = selectedRequests.filter(isDeletable).map(r => r.id);
+
+  const handleBulkDeny = async () => {
+    if (selectedDeniableIds.length === 0) return;
+    const reason = window.prompt('Enter decline reason for selected requests:')?.trim();
+    if (!reason) return;
+    setBulkActing(true);
+    setError('');
+    try {
+      const result = await bulkDenyRequests(selectedDeniableIds, reason);
+      setSelectedIds(new Set());
+      setSuccessMsg(`Successfully declined ${result.denied} request${result.denied !== 1 ? 's' : ''}.`);
+      setTimeout(() => setSuccessMsg(''), 5000);
+      fetchRequests();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Bulk decline failed');
+    } finally {
+      setBulkActing(false);
+    }
+  };
+
+  const handleBulkVoid = async () => {
+    if (selectedVoidableIds.length === 0) return;
+    const reason = window.prompt('Enter void reason for selected requests:')?.trim();
+    if (!reason) return;
+    setBulkActing(true);
+    setError('');
+    try {
+      const result = await bulkVoidRequests(selectedVoidableIds, reason);
+      setSelectedIds(new Set());
+      setSuccessMsg(`Successfully voided ${result.voided} request${result.voided !== 1 ? 's' : ''}.`);
+      setTimeout(() => setSuccessMsg(''), 5000);
+      fetchRequests();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Bulk void failed');
+    } finally {
+      setBulkActing(false);
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedDeletableIds.length === 0) return;
+    if (!window.confirm(`Delete ${selectedDeletableIds.length} selected request(s)? This cannot be undone.`)) return;
+    setBulkActing(true);
+    setError('');
+    try {
+      const result = await bulkDeleteRequests(selectedDeletableIds);
+      setSelectedIds(new Set());
+      setSuccessMsg(`Successfully deleted ${result.deleted} request${result.deleted !== 1 ? 's' : ''}.`);
+      setTimeout(() => setSuccessMsg(''), 5000);
+      fetchRequests();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Bulk delete failed');
+    } finally {
+      setBulkActing(false);
     }
   };
 
@@ -262,14 +344,46 @@ export function Dashboard() {
         }}>
           <span>{selectedIds.size} request{selectedIds.size !== 1 ? 's' : ''} selected</span>
           <div style={{ display: 'flex', gap: '12px' }}>
-            <button
-              className="btn btn-primary"
-              onClick={handleBulkSign}
-              disabled={bulkSigning}
-              style={{ background: '#F5A800', color: '#1B2A4A', fontWeight: 700 }}
-            >
-              {bulkSigning ? 'Approving…' : 'Bulk Approve'}
-            </button>
+            {selectedApprovableIds.length > 0 && (
+              <button
+                className="btn btn-primary"
+                onClick={handleBulkSign}
+                disabled={bulkSigning || bulkActing}
+                style={{ background: '#F5A800', color: '#1B2A4A', fontWeight: 700 }}
+              >
+                {bulkSigning ? 'Approving…' : `Bulk Approve (${selectedApprovableIds.length})`}
+              </button>
+            )}
+            {selectedDeniableIds.length > 0 && (
+              <button
+                className="btn btn-secondary"
+                onClick={handleBulkDeny}
+                disabled={bulkSigning || bulkActing}
+                style={{ background: '#dc2626', color: '#fff', border: '1px solid #dc2626' }}
+              >
+                {bulkActing ? 'Processing…' : `Bulk Decline (${selectedDeniableIds.length})`}
+              </button>
+            )}
+            {selectedVoidableIds.length > 0 && (
+              <button
+                className="btn btn-secondary"
+                onClick={handleBulkVoid}
+                disabled={bulkSigning || bulkActing}
+                style={{ background: '#6b7280', color: '#fff', border: '1px solid #6b7280' }}
+              >
+                {bulkActing ? 'Processing…' : `Bulk Void (${selectedVoidableIds.length})`}
+              </button>
+            )}
+            {selectedDeletableIds.length > 0 && (
+              <button
+                className="btn btn-secondary"
+                onClick={handleBulkDelete}
+                disabled={bulkSigning || bulkActing}
+                style={{ background: '#111827', color: '#fff', border: '1px solid #111827' }}
+              >
+                {bulkActing ? 'Processing…' : `Bulk Delete (${selectedDeletableIds.length})`}
+              </button>
+            )}
             <button
               className="btn btn-secondary"
               onClick={() => setSelectedIds(new Set())}

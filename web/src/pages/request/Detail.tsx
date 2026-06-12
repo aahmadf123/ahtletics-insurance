@@ -121,12 +121,12 @@ export function RequestDetail() {
     (user?.role === 'cfo' && awaitingApproval && !req.cfoSigned) ||
     (user?.role === 'super_admin' && awaitingApproval && (!req.sportAdminSigned || !req.cfoSigned));
 
-  // The head coach denies at their step; the Sport Admin denies at the approval step;
-  // Super Admin can deny while pending. The CFO's terminal action is Void, not Deny.
+  // The head coach denies at their step; Sport Admin and CFO deny at approval;
+  // Super Admin can deny while pending.
   // Denial requires a written reason (1.4).
   const canDeny =
     (user?.role === 'coach' && req.status === 'PENDING_COACH') ||
-    (user?.role === 'sport_admin' && awaitingApproval) ||
+    ((user?.role === 'sport_admin' || user?.role === 'cfo') && awaitingApproval) ||
     (user?.role === 'super_admin' && isPending);
 
   const canResubmit = req.status === 'DENIED' && (user?.role === 'coach' || user?.role === 'super_admin');

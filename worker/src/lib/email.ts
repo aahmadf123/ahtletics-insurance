@@ -8,6 +8,7 @@ function escapeHtml(s: string): string {
 
 export interface Env {
   RESEND_API_KEY?: string;
+  FROM_NAME?: string;
   FROM_EMAIL: string;
   APP_BASE_URL: string;
   CFO_EMAIL: string;
@@ -109,7 +110,7 @@ async function sendEmail(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        from: `Athletics Business Office <${env.FROM_EMAIL}>`,
+        from: `${(env.FROM_NAME || 'Athletics Business Office').trim()} <${env.FROM_EMAIL}>`,
         to: recipients,
         subject,
         html,

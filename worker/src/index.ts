@@ -20,6 +20,7 @@ export interface Env {
   DB: D1Database;
   JWT_SECRET: string;
   CFO_EMAIL: string;
+  FROM_NAME?: string;
   FROM_EMAIL: string;
   APP_BASE_URL: string;
   RESEND_API_KEY?: string;
@@ -35,6 +36,14 @@ const CREATE_RESET_TOKENS_TABLE = `
     user_id TEXT NOT NULL,
     expires_at INTEGER NOT NULL,
     used INTEGER NOT NULL DEFAULT 0
+  )
+`;
+
+const CREATE_APP_SETTINGS_TABLE = `
+  CREATE TABLE IF NOT EXISTS app_settings (
+    setting_key TEXT PRIMARY KEY,
+    setting_value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )
 `;
 
@@ -125,6 +134,58 @@ const safeFilePart = (s: string) => s.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-
 
 const isSecure = (req: Request) =>
   new URL(req.url).protocol === 'https:';
+
+const DEFAULT_FROM_NAME = 'Athletics Business Office';
+type PortalSettings = { fromName: string; fromEmail: string; appBaseUrl: string };
+
+async function ensureAppSettingsTable(env: Env): Promise<void> {
+  await env.DB.prepare(CREATE_APP_SETTINGS_TABLE).run();
+}
+
+async function getPortalSettings(env: Env): Promise<PortalSettings> {
+  const defaults: PortalSettings = {
+    fromName: env.FROM_NAME?.trim() || DEFAULT_FROM_NAME,
+    fromEmail: env.FROM_EMAIL,
+    appBaseUrl: env.APP_BASE_URL,
+  };
+
+  try {
+    await ensureAppSettingsTable(env);
+    const { results } = await env.DB.prepare(
+      `SELECT setting_key, setting_value FROM app_settings
+       WHERE setting_key IN ('from_name', 'from_email', 'app_base_url')`
+    ).all<{ setting_key: string; setting_value: string }>();
+    const map = new Map(results.map(r => [r.setting_key, r.setting_value]));
+    return {
+      fromName: (map.get('from_name') || defaults.fromName).trim() || defaults.fromName,
+      fromEmail: (map.get('from_email') || defaults.fromEmail).trim() || defaults.fromEmail,
+      appBaseUrl: (map.get('app_base_url') || defaults.appBaseUrl).trim() || defaults.appBaseUrl,
+    };
+  } catch {
+    // If settings storage is unavailable, safely fall back to env vars.
+    return defaults;
+  }
+}
+
+async function getConfiguredEnv(env: Env): Promise<Env> {
+  const settings = await getPortalSettings(env);
+  return {
+    ...env,
+    FROM_NAME: settings.fromName,
+    FROM_EMAIL: settings.fromEmail,
+    APP_BASE_URL: settings.appBaseUrl,
+  };
+}
+
+const EMAIL_SIMPLE_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+function isValidHttpUrl(value: string): boolean {
+  try {
+    const u = new URL(value);
+    return u.protocol === 'https:' || u.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
 
 // ── Approval helpers (parallel approval model) ───────────────────────────────
 
@@ -478,7 +539,8 @@ app.post('/auth/forgot-password', async c => {
       'INSERT INTO password_reset_tokens (token, user_id, expires_at, used) VALUES (?, ?, ?, 0)'
     ).bind(token, dbUser.id, expiresAt).run();
 
-    const resetUrl = `${c.env.APP_BASE_URL}/reset-password?token=${token}`;
+    const settings = await getPortalSettings(c.env);
+    const resetUrl = `${settings.appBaseUrl}/reset-password?token=${token}`;
 
     if (c.env.RESEND_API_KEY) {
       await fetch('https://api.resend.com/emails', {
@@ -488,7 +550,7 @@ app.post('/auth/forgot-password', async c => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          from: c.env.FROM_EMAIL,
+          from: `${settings.fromName} <${settings.fromEmail}>`,
           to: email.toLowerCase().trim(),
           subject: 'Athletics Insurance Portal — Password Reset',
           html: `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px"><h2 style="color:#003DA5">Password Reset Request</h2><p>Hi ${dbUser.name},</p><p>We received a request to reset your password for the University of Toledo Athletics Insurance Portal.</p><p><a href="${resetUrl}" style="background:#003DA5;color:white;padding:10px 20px;border-radius:6px;text-decoration:none;display:inline-block;margin:12px 0">Reset My Password</a></p><p style="color:#666;font-size:14px">This link will expire in 1 hour. If you did not request a password reset, please ignore this email.</p><hr style="margin-top:30px;border:none;border-top:1px solid #eee"/><p style="color:#888;font-size:12px">University of Toledo Athletics — Health Insurance Request System</p></div>`,
@@ -783,7 +845,11 @@ app.post('/api/requests', async c => {
   const headCoach = await getHeadCoachForSport(c.env, sport);
   for (const id of newIds) {
     const d = await loadRequestEmailData(c.env, id);
-    if (d) { d.status = 'PENDING_COACH'; await notifyOnCreate(c.env, d, headCoach?.email); }
+    if (d) {
+      d.status = 'PENDING_COACH';
+      const mailEnv = await getConfiguredEnv(c.env);
+      await notifyOnCreate(mailEnv, d, headCoach?.email);
+    }
   }
 
   return json(created, 201);
@@ -904,7 +970,11 @@ app.post('/api/requests/:id/sign', async c => {
     await c.env.DB.prepare('UPDATE insurance_requests SET status = ?, coach_name = ? WHERE id = ?')
       .bind(newStatus, signatoryName, id).run();
     const d = await loadRequestEmailData(c.env, id);
-    if (d) { d.status = newStatus; await notifyApprovers(c.env, d); }
+    if (d) {
+      d.status = newStatus;
+      const mailEnv = await getConfiguredEnv(c.env);
+      await notifyApprovers(mailEnv, d);
+    }
   } else {
     // Sport Admin or CFO approval — executed once all required approvals exist
     const allApproved = await hasAllApprovals(c.env, id, req.sport);
@@ -913,7 +983,11 @@ app.post('/api/requests/:id/sign', async c => {
       .bind(newStatus, id).run();
     if (allApproved) {
       const d = await loadRequestEmailData(c.env, id);
-      if (d) { d.status = newStatus; await notifyExecuted(c.env, d, await buildRequestPdfAttachment(c.env, id)); }
+      if (d) {
+        d.status = newStatus;
+        const mailEnv = await getConfiguredEnv(c.env);
+        await notifyExecuted(mailEnv, d, await buildRequestPdfAttachment(c.env, id));
+      }
     }
   }
 
@@ -966,18 +1040,21 @@ app.post('/api/requests/:id/void', async c => {
   await audit(c.env, id, 'VOIDED', user.email, { reason: reason.trim() }, clientIp(c));
 
   const d = await loadRequestEmailData(c.env, id);
-  if (d) { d.status = 'VOIDED'; d.voidReason = reason.trim(); await notifyVoided(c.env, d, pdf); }
+  if (d) {
+    d.status = 'VOIDED';
+    d.voidReason = reason.trim();
+    const mailEnv = await getConfiguredEnv(c.env);
+    await notifyVoided(mailEnv, d, pdf);
+  }
 
   return json({ id, status: 'VOIDED' });
 });
 
-// POST /api/requests/:id/deny — head coach (in-app) or sport admin denies with a reason (1.4).
-// The CFO's terminal action is /void; denial is reserved for the head coach and sport admin
-// (super_admin retained for oversight).
+// POST /api/requests/:id/deny — deny a pending request with a reason (1.4).
 app.post('/api/requests/:id/deny', async c => {
   const user = await getUser(c.req.raw, c.env.JWT_SECRET);
   if (!user) return err('Unauthorized', 401);
-  if (!['coach', 'sport_admin', 'super_admin'].includes(user.role)) {
+  if (!['coach', 'sport_admin', 'cfo', 'super_admin'].includes(user.role)) {
     return err('You are not permitted to deny requests', 403);
   }
 
@@ -994,13 +1071,21 @@ app.post('/api/requests/:id/deny', async c => {
   if (user.role === 'sport_admin' && !(await sportAdminScopeIncludes(c.env, user, req.sport))) {
     return err('This request is outside your assigned sports', 403);
   }
+  if (user.role === 'cfo' && req.status !== 'PENDING_APPROVAL') {
+    return err('CFO can only deny requests that are pending approval', 409);
+  }
 
   await c.env.DB.prepare('UPDATE insurance_requests SET status = ?, denial_reason = ? WHERE id = ?')
     .bind('DENIED', reason.trim(), id).run();
   await audit(c.env, id, 'DENIED', user.email || user.name, { reason: reason.trim(), role: user.role }, clientIp(c));
 
   const d = await loadRequestEmailData(c.env, id);
-  if (d) { d.status = 'DENIED'; d.denialReason = reason.trim(); await notifyDenied(c.env, d); }
+  if (d) {
+    d.status = 'DENIED';
+    d.denialReason = reason.trim();
+    const mailEnv = await getConfiguredEnv(c.env);
+    await notifyDenied(mailEnv, d);
+  }
 
   return json({ id, status: 'DENIED' });
 });
@@ -1060,7 +1145,11 @@ app.post('/api/requests/:id/resubmit', async c => {
 
   const headCoach = await getHeadCoachForSport(c.env, sport);
   const d = await loadRequestEmailData(c.env, newId);
-  if (d) { d.status = 'PENDING_COACH'; await notifyOnCreate(c.env, d, headCoach?.email); }
+  if (d) {
+    d.status = 'PENDING_COACH';
+    const mailEnv = await getConfiguredEnv(c.env);
+    await notifyOnCreate(mailEnv, d, headCoach?.email);
+  }
 
   return json({ id: newId, status: 'PENDING_COACH', parentRequestId: id }, 201);
 });
@@ -1181,6 +1270,50 @@ function csvEscape(value: string): string {
 // ── Admin — users ─────────────────────────────────────────────────────────────
 
 const isAdmin = (role: string) => role === 'cfo' || role === 'super_admin';
+
+// GET /api/admin/settings — system email + portal URL settings (Super Admin)
+app.get('/api/admin/settings', async c => {
+  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  if (!user || user.role !== 'super_admin') return err('Only Super Admin can access settings', 403);
+  const settings = await getPortalSettings(c.env);
+  return json(settings);
+});
+
+// PUT /api/admin/settings — update system email + portal URL settings (Super Admin)
+app.put('/api/admin/settings', async c => {
+  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  if (!user || user.role !== 'super_admin') return err('Only Super Admin can update settings', 403);
+
+  const body = await c.req.json<{ fromName: string; fromEmail: string; appBaseUrl: string }>();
+  const fromName = body.fromName?.trim();
+  const fromEmail = body.fromEmail?.trim().toLowerCase();
+  const appBaseUrl = body.appBaseUrl?.trim();
+
+  if (!fromName) return err('From name is required');
+  if (!fromEmail || !EMAIL_SIMPLE_RE.test(fromEmail)) return err('Valid from email is required');
+  if (!appBaseUrl || !isValidHttpUrl(appBaseUrl)) return err('Valid portal base URL is required (http/https)');
+
+  await ensureAppSettingsTable(c.env);
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `INSERT INTO app_settings (setting_key, setting_value, updated_at)
+       VALUES ('from_name', ?, datetime('now'))
+       ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = datetime('now')`
+    ).bind(fromName),
+    c.env.DB.prepare(
+      `INSERT INTO app_settings (setting_key, setting_value, updated_at)
+       VALUES ('from_email', ?, datetime('now'))
+       ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = datetime('now')`
+    ).bind(fromEmail),
+    c.env.DB.prepare(
+      `INSERT INTO app_settings (setting_key, setting_value, updated_at)
+       VALUES ('app_base_url', ?, datetime('now'))
+       ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = datetime('now')`
+    ).bind(appBaseUrl.replace(/\/$/, '')),
+  ]);
+
+  return json({ ok: true, fromName, fromEmail, appBaseUrl: appBaseUrl.replace(/\/$/, '') });
+});
 
 app.get('/api/admin/users', async c => {
   const user = await getUser(c.req.raw, c.env.JWT_SECRET);
@@ -1339,7 +1472,11 @@ app.post('/api/requests/bulk-sign', async c => {
       await c.env.DB.prepare('UPDATE insurance_requests SET status = ?, coach_name = ? WHERE id = ?')
         .bind(newStatus, signatoryName, id).run();
       const d = await loadRequestEmailData(c.env, id);
-      if (d) { d.status = newStatus; await notifyApprovers(c.env, d); }
+      if (d) {
+        d.status = newStatus;
+        const mailEnv = await getConfiguredEnv(c.env);
+        await notifyApprovers(mailEnv, d);
+      }
     } else {
       const allApproved = await hasAllApprovals(c.env, id, req.sport);
       newStatus = allApproved ? 'EXECUTED' : 'PENDING_APPROVAL';
@@ -1347,7 +1484,11 @@ app.post('/api/requests/bulk-sign', async c => {
         .bind(newStatus, id).run();
       if (allApproved) {
         const d = await loadRequestEmailData(c.env, id);
-        if (d) { d.status = newStatus; await notifyExecuted(c.env, d, await buildRequestPdfAttachment(c.env, id)); }
+        if (d) {
+          d.status = newStatus;
+          const mailEnv = await getConfiguredEnv(c.env);
+          await notifyExecuted(mailEnv, d, await buildRequestPdfAttachment(c.env, id));
+        }
       }
     }
 
@@ -1355,6 +1496,116 @@ app.post('/api/requests/bulk-sign', async c => {
   }
 
   return json({ signed: results.length, results });
+});
+
+// POST /api/requests/bulk-deny — bulk decline pending requests
+app.post('/api/requests/bulk-deny', async c => {
+  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  if (!user) return err('Unauthorized', 401);
+  if (!['coach', 'sport_admin', 'cfo', 'super_admin'].includes(user.role)) {
+    return err('You are not permitted to bulk deny requests', 403);
+  }
+
+  const { ids, reason } = await c.req.json<{ ids: string[]; reason: string }>();
+  if (!ids?.length) return err('No request IDs provided');
+  if (!reason?.trim()) return err('A denial reason is required');
+
+  const ip = clientIp(c);
+  const adminScope = user.role === 'sport_admin'
+    ? new Set(await sportAdminScopeIds(c.env, { sub: user.sub, sportId: user.sportId }))
+    : null;
+  const results: { id: string; status: string }[] = [];
+
+  for (const id of ids) {
+    const req = await c.env.DB.prepare('SELECT status, sport FROM insurance_requests WHERE id = ?')
+      .bind(id).first<{ status: string; sport: string }>();
+    if (!req) continue;
+
+    if (req.status !== 'PENDING_COACH' && req.status !== 'PENDING_APPROVAL') continue;
+    if (adminScope && !adminScope.has(req.sport)) continue;
+    if (user.role === 'cfo' && req.status !== 'PENDING_APPROVAL') continue;
+
+    await c.env.DB.prepare('UPDATE insurance_requests SET status = ?, denial_reason = ? WHERE id = ?')
+      .bind('DENIED', reason.trim(), id).run();
+    await audit(c.env, id, 'DENIED', user.email || user.name,
+      { reason: reason.trim(), role: user.role, bulk: true }, ip);
+
+    const d = await loadRequestEmailData(c.env, id);
+    if (d) {
+      d.status = 'DENIED';
+      d.denialReason = reason.trim();
+      const mailEnv = await getConfiguredEnv(c.env);
+      await notifyDenied(mailEnv, d);
+    }
+    results.push({ id, status: 'DENIED' });
+  }
+
+  return json({ denied: results.length, results });
+});
+
+// POST /api/requests/bulk-void — bulk void pending requests (CFO/Super Admin)
+app.post('/api/requests/bulk-void', async c => {
+  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  if (!user) return err('Unauthorized', 401);
+  if (user.role !== 'cfo' && user.role !== 'super_admin') {
+    return err('Only CFO or Super Admin can bulk void requests', 403);
+  }
+
+  const { ids, reason } = await c.req.json<{ ids: string[]; reason: string }>();
+  if (!ids?.length) return err('No request IDs provided');
+  if (!reason?.trim()) return err('Void reason is required');
+
+  const ip = clientIp(c);
+  const results: { id: string; status: string }[] = [];
+
+  for (const id of ids) {
+    const req = await c.env.DB.prepare('SELECT status FROM insurance_requests WHERE id = ?')
+      .bind(id).first<{ status: string }>();
+    if (!req) continue;
+    if (req.status !== 'PENDING_APPROVAL' && req.status !== 'PENDING_COACH') continue;
+
+    const pdf = await buildRequestPdfAttachment(c.env, id);
+    await c.env.DB.prepare('UPDATE insurance_requests SET status = ? WHERE id = ?')
+      .bind('VOIDED', id).run();
+    await audit(c.env, id, 'VOIDED', user.email || user.name,
+      { reason: reason.trim(), bulk: true }, ip);
+
+    const d = await loadRequestEmailData(c.env, id);
+    if (d) {
+      d.status = 'VOIDED';
+      d.voidReason = reason.trim();
+      const mailEnv = await getConfiguredEnv(c.env);
+      await notifyVoided(mailEnv, d, pdf);
+    }
+    results.push({ id, status: 'VOIDED' });
+  }
+
+  return json({ voided: results.length, results });
+});
+
+// DELETE /api/requests/bulk-delete — permanent bulk delete (Super Admin only)
+app.delete('/api/requests/bulk-delete', async c => {
+  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  if (!user) return err('Unauthorized', 401);
+  if (user.role !== 'super_admin') return err('Only Super Admin can bulk delete requests', 403);
+
+  const { ids } = await c.req.json<{ ids: string[] }>();
+  if (!ids?.length) return err('No request IDs provided');
+
+  let deleted = 0;
+  for (const id of ids) {
+    const req = await c.env.DB.prepare('SELECT id FROM insurance_requests WHERE id = ?').bind(id).first();
+    if (!req) continue;
+
+    await c.env.DB.batch([
+      c.env.DB.prepare('DELETE FROM signatures WHERE request_id = ?').bind(id),
+      c.env.DB.prepare('DELETE FROM audit_log WHERE request_id = ?').bind(id),
+      c.env.DB.prepare('DELETE FROM insurance_requests WHERE id = ?').bind(id),
+    ]);
+    deleted++;
+  }
+
+  return json({ deleted });
 });
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -1730,7 +1981,11 @@ app.post('/api/requests/bulk', async c => {
       const hc = headCoachBySport.get(r.sport);
       if (hc?.email) {
         const d = await loadRequestEmailData(c.env, id);
-        if (d) { d.status = 'PENDING_COACH'; await notifyPendingHeadCoach(c.env, d, hc.email); }
+        if (d) {
+          d.status = 'PENDING_COACH';
+          const mailEnv = await getConfiguredEnv(c.env);
+          await notifyPendingHeadCoach(mailEnv, d, hc.email);
+        }
       }
       created.push({ id, studentName, rocketNumber: rocketNumber! });
     } catch (e) {
@@ -1756,6 +2011,7 @@ app.all('*', async c => {
 // ── Scheduled: 48h reminder emails ───────────────────────────────────────────
 
 async function runReminders(env: Env): Promise<void> {
+  const mailEnv = await getConfiguredEnv(env);
   const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
 
   const { results } = await env.DB.prepare(`
@@ -1807,11 +2063,11 @@ async function runReminders(env: Env): Promise<void> {
     if (!isSoftball(r.sport) && !r.sportAdminSigned) {
       const adminEmails = await getSportAdminEmailsForSport(env, r.sport);
       for (const to of adminEmails) {
-        await notifyReminder(env, emailData, to, 'Sport Administrator');
+        await notifyReminder(mailEnv, emailData, to, 'Sport Administrator');
       }
     }
     if (!r.cfoSigned) {
-      await notifyReminder(env, emailData, env.CFO_EMAIL, 'CFO');
+      await notifyReminder(mailEnv, emailData, env.CFO_EMAIL, 'CFO');
     }
 
     await audit(env, r.id, 'REMINDER_SENT', 'system', { status: r.status });
