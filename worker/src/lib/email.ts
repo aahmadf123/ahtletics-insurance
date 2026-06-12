@@ -33,7 +33,8 @@ export interface EmailData {
   headCoachEmail?: string;
   voidReason?: string;
   denialReason?: string;
-  submissionDeadline?: string; // human-readable deadline, used for the .ics reminder
+  submissionDeadline?: string; // human-readable deadline (PDF / display)
+  submissionDeadlineISO?: string; // YYYY-MM-DD, parsed deterministically for the .ics reminder
 }
 
 export interface EmailAttachment {
@@ -144,8 +145,9 @@ function icsEscape(s: string): string {
 
 /** Build a one-event .ics reminding the approver of the submission deadline. */
 export function buildApprovalIcs(env: Env, d: EmailData): EmailAttachment | null {
-  if (!d.submissionDeadline) return null;
-  const due = new Date(d.submissionDeadline);
+  // Use the deterministic ISO date (YYYY-MM-DD); avoid parsing the human-formatted string.
+  if (!d.submissionDeadlineISO || !/^\d{4}-\d{2}-\d{2}$/.test(d.submissionDeadlineISO)) return null;
+  const due = new Date(`${d.submissionDeadlineISO}T17:00:00Z`); // 5pm UTC on the deadline day
   if (isNaN(due.getTime())) return null;
   const fmt = (dt: Date) =>
     dt.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');

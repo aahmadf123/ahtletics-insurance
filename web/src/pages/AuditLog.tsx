@@ -100,7 +100,7 @@ export function AuditLog() {
             <tbody>
               {entries.map(e => (
                 <tr key={e.id}>
-                  <td style={{ whiteSpace: 'nowrap' }}>{new Date(e.timestamp + 'Z').toLocaleString()}</td>
+                  <td style={{ whiteSpace: 'nowrap' }}>{new Date(e.timestamp.replace(' ', 'T') + 'Z').toLocaleString()}</td>
                   <td><span className="badge badge--audit">{e.action.replace(/_/g, ' ')}</span></td>
                   <td>{e.actor}</td>
                   <td>{e.studentName ?? '—'}{e.rocketNumber ? <> <code>{e.rocketNumber}</code></> : null}</td>

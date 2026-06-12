@@ -9,7 +9,8 @@ import {
   bytesToBase64, type EmailData, type EmailAttachment,
 } from './lib/email';
 import {
-  validateRocketNumber, isBeforeDeadline, getPremiumForTerm, getSubmissionDeadline, newUUID,
+  validateRocketNumber, isBeforeDeadline, getPremiumForTerm, getSubmissionDeadline,
+  getSubmissionDeadlineISO, newUUID,
 } from './lib/validation';
 import { buildInsuranceFormPdf, type PdfFormData } from './lib/pdf';
 
@@ -118,6 +119,9 @@ const STATUS_LABELS: Record<string, string> = {
   EXPIRED: 'Expired',
 };
 const prettyStatus = (s: string) => STATUS_LABELS[s] ?? s.replace(/_/g, ' ');
+
+// Make a value safe for a download filename / Content-Disposition (e.g. "Spring/Summer" → "Spring-Summer").
+const safeFilePart = (s: string) => s.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 
 const isSecure = (req: Request) =>
   new URL(req.url).protocol === 'https:';
@@ -276,6 +280,7 @@ async function loadRequestEmailData(env: Env, id: string): Promise<EmailData | n
     headCoachEmail: headCoach?.email,
     denialReason: (r.denial_reason as string) || undefined,
     submissionDeadline: getSubmissionDeadline(r.term as string),
+    submissionDeadlineISO: getSubmissionDeadlineISO(r.term as string),
   };
 }
 
@@ -322,7 +327,7 @@ async function buildRequestPdfAttachment(env: Env, id: string): Promise<EmailAtt
   try {
     const bytes = await buildInsuranceFormPdf(data);
     return {
-      filename: `insurance-request-${data.rocketNumber}-${data.term.replace(/\s+/g, '-')}.pdf`,
+      filename: `insurance-request-${safeFilePart(data.rocketNumber)}-${safeFilePart(data.term)}.pdf`,
       content: bytesToBase64(bytes),
     };
   } catch (e) {
@@ -331,10 +336,15 @@ async function buildRequestPdfAttachment(env: Env, id: string): Promise<EmailAtt
   }
 }
 
-/** On head-coach approval: confirm to coach + student, and ask both approvers to act. */
-async function notifySubmission(env: Env, d: EmailData): Promise<void> {
+/** On submission: confirm to coach + student and ask the head coach to approve (Step 1). */
+async function notifyOnCreate(env: Env, d: EmailData, headCoachEmail?: string): Promise<void> {
   await notifyCoachSubmitted(env, d);
   await notifyStudentSubmitted(env, d);
+  if (headCoachEmail) await notifyPendingHeadCoach(env, d, headCoachEmail);
+}
+
+/** After the head coach approves: ask the Sport Admin(s) and CFO to act (Step 2). */
+async function notifyApprovers(env: Env, d: EmailData): Promise<void> {
   if (!isSoftball(d.sport) && d.sportAdminEmails?.length) {
     await notifyPendingSportAdmin(env, d, d.sportAdminEmails);
   }
@@ -768,13 +778,12 @@ app.post('/api/requests', async c => {
     created.push({ id, studentName: athlete.studentName.trim(), rocketNumber: athlete.rocketNumber, studentEmail, sport, term: body.term, premiumCost, fundingSource, status: initialStatus, coachEmail, coachName });
   }
 
-  // Route the Step-1 approval email to the head coach (or active delegate) of the sport (1.1).
+  // Confirm to coach + student and route the Step-1 approval email to the head coach
+  // (or active delegate) of the sport (1.1).
   const headCoach = await getHeadCoachForSport(c.env, sport);
-  if (headCoach?.email) {
-    for (const id of newIds) {
-      const d = await loadRequestEmailData(c.env, id);
-      if (d) { d.status = 'PENDING_COACH'; await notifyPendingHeadCoach(c.env, d, headCoach.email); }
-    }
+  for (const id of newIds) {
+    const d = await loadRequestEmailData(c.env, id);
+    if (d) { d.status = 'PENDING_COACH'; await notifyOnCreate(c.env, d, headCoach?.email); }
   }
 
   return json(created, 201);
@@ -895,7 +904,7 @@ app.post('/api/requests/:id/sign', async c => {
     await c.env.DB.prepare('UPDATE insurance_requests SET status = ?, coach_name = ? WHERE id = ?')
       .bind(newStatus, signatoryName, id).run();
     const d = await loadRequestEmailData(c.env, id);
-    if (d) { d.status = newStatus; await notifySubmission(c.env, d); }
+    if (d) { d.status = newStatus; await notifyApprovers(c.env, d); }
   } else {
     // Sport Admin or CFO approval — executed once all required approvals exist
     const allApproved = await hasAllApprovals(c.env, id, req.sport);
@@ -923,7 +932,7 @@ app.get('/api/requests/:id/pdf', async c => {
 
   const pdfBytes = await buildInsuranceFormPdf(pdfData);
 
-  const filename = `insurance-auth-${pdfData.rocketNumber}-${pdfData.term.replace(/\s+/g, '-')}.pdf`;
+  const filename = `insurance-auth-${safeFilePart(pdfData.rocketNumber)}-${safeFilePart(pdfData.term)}.pdf`;
   return new Response(pdfBytes, {
     headers: {
       'Content-Type': 'application/pdf',
@@ -962,11 +971,13 @@ app.post('/api/requests/:id/void', async c => {
   return json({ id, status: 'VOIDED' });
 });
 
-// POST /api/requests/:id/deny — head coach (in-app) or sport admin denies with a reason (1.4)
+// POST /api/requests/:id/deny — head coach (in-app) or sport admin denies with a reason (1.4).
+// The CFO's terminal action is /void; denial is reserved for the head coach and sport admin
+// (super_admin retained for oversight).
 app.post('/api/requests/:id/deny', async c => {
   const user = await getUser(c.req.raw, c.env.JWT_SECRET);
   if (!user) return err('Unauthorized', 401);
-  if (!['coach', 'sport_admin', 'cfo', 'super_admin'].includes(user.role)) {
+  if (!['coach', 'sport_admin', 'super_admin'].includes(user.role)) {
     return err('You are not permitted to deny requests', 403);
   }
 
@@ -1048,10 +1059,8 @@ app.post('/api/requests/:id/resubmit', async c => {
   await audit(c.env, newId, 'RESUBMITTED', coachName || user.name, { resubmissionOf: id }, clientIp(c));
 
   const headCoach = await getHeadCoachForSport(c.env, sport);
-  if (headCoach?.email) {
-    const d = await loadRequestEmailData(c.env, newId);
-    if (d) { d.status = 'PENDING_COACH'; await notifyPendingHeadCoach(c.env, d, headCoach.email); }
-  }
+  const d = await loadRequestEmailData(c.env, newId);
+  if (d) { d.status = 'PENDING_COACH'; await notifyOnCreate(c.env, d, headCoach?.email); }
 
   return json({ id: newId, status: 'PENDING_COACH', parentRequestId: id }, 201);
 });
@@ -1330,7 +1339,7 @@ app.post('/api/requests/bulk-sign', async c => {
       await c.env.DB.prepare('UPDATE insurance_requests SET status = ?, coach_name = ? WHERE id = ?')
         .bind(newStatus, signatoryName, id).run();
       const d = await loadRequestEmailData(c.env, id);
-      if (d) { d.status = newStatus; await notifySubmission(c.env, d); }
+      if (d) { d.status = newStatus; await notifyApprovers(c.env, d); }
     } else {
       const allApproved = await hasAllApprovals(c.env, id, req.sport);
       newStatus = allApproved ? 'EXECUTED' : 'PENDING_APPROVAL';
@@ -1446,13 +1455,17 @@ const coachSelect = `
 
 // GET /api/sports/:id/coaches — list coaches for a sport (any authenticated user;
 // used both by the Super Admin UI and to resolve the coach's name on the request form).
+// Out-of-office delegation fields are only returned to the Super Admin who manages them.
 app.get('/api/sports/:id/coaches', async c => {
   const user = await getUser(c.req.raw, c.env.JWT_SECRET);
   if (!user) return err('Unauthorized', 401);
   const { id } = c.req.param();
   const { results } = await c.env.DB.prepare(
     `${coachSelect} WHERE sport_id = ? ORDER BY is_head_coach DESC, display_name`
-  ).bind(id).all();
+  ).bind(id).all<Record<string, unknown>>();
+  if (user.role !== 'super_admin') {
+    return json(results.map(({ delegatedApproverEmail, delegationExpiresAt, ...rest }) => rest));
+  }
   return json(results);
 });
 

@@ -41,6 +41,15 @@ export function getPremiumForTerm(term: string): number {
   return premiums[termKey] ?? 0;
 }
 
+/** Deterministic ISO date (YYYY-MM-DD) for a term's submission deadline, for machine use (.ics). */
+export function getSubmissionDeadlineISO(term: string): string {
+  const termKey = termKeyFor(term);
+  const deadline = DEADLINES[termKey];
+  if (!deadline) return '';
+  const year = term.slice(termKey.length).trim().split(' ')[0] || String(new Date().getFullYear());
+  return `${year}-${String(deadline.month).padStart(2, '0')}-${String(deadline.day).padStart(2, '0')}`;
+}
+
 /** Get the submission deadline string for a given term (e.g. "Fall 2026" → "September 8, 2026") */
 export function getSubmissionDeadline(term: string): string {
   const termKey = termKeyFor(term);
