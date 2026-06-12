@@ -1538,7 +1538,14 @@ app.put('/api/admin/coaches/:id', async c => {
     body.title !== undefined ? (body.title?.trim() || null) : (coach.title as string | null),
     isHeadCoach,
     body.delegatedApproverEmail !== undefined ? delegateEmail : (coach.delegated_approver_email as string | null),
-    body.delegationExpiresAt !== undefined ? (body.delegationExpiresAt || null) : (coach.delegation_expires_at as string | null),
+    (() => {
+      const raw = body.delegationExpiresAt !== undefined
+        ? (body.delegationExpiresAt || null)
+        : (coach.delegation_expires_at as string | null);
+      // Normalize date-only inputs (YYYY-MM-DD) to end-of-day so the stored value
+      // is unambiguous regardless of the caller's locale.
+      return raw && /^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T23:59:59.999Z` : raw;
+    })(),
     id,
   ).run();
   await syncHeadCoachColumns(c.env, sportId);
