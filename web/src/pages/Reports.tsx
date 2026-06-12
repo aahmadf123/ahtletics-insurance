@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../lib/auth';
-import { getReports, getReportsCsvUrl, listSports } from '../lib/api';
+import { getReports, getReportsCsvUrl, listSports, getBudgetReport, updateSportBudget, type BudgetSportRow } from '../lib/api';
 import { StatusBadge } from '../components/StatusBadge';
 import { summarizeBySport, exportReportXlsx } from '../lib/analytics';
 import type { ReportRow, SportProgram, RequestStatus } from '../types';
 
 const ALL_STATUSES: RequestStatus[] = [
-  'PENDING_COACH', 'PENDING_APPROVAL', 'EXECUTED', 'VOIDED', 'EXPIRED',
+  'PENDING_COACH', 'PENDING_APPROVAL', 'EXECUTED', 'DENIED', 'VOIDED', 'EXPIRED',
 ];
 
 export function Reports() {
@@ -24,11 +24,41 @@ export function Reports() {
   const [filterStatus, setFilterStatus] = useState('');
   const [filterCoach, setFilterCoach] = useState('');
 
+  // Tab + budget dashboard (2.3)
+  const [tab, setTab] = useState<'overview' | 'budget'>('overview');
+  const [budget, setBudget] = useState<BudgetSportRow[]>([]);
+  const [budgetDrafts, setBudgetDrafts] = useState<Record<string, string>>({});
+  const [savingBudget, setSavingBudget] = useState<string | null>(null);
+
+  const loadBudget = () => {
+    getBudgetReport()
+      .then(r => {
+        setBudget(r.sports);
+        setBudgetDrafts(Object.fromEntries(r.sports.map(s => [s.sportId, s.budgetCap != null ? String(s.budgetCap) : ''])));
+      })
+      .catch(console.error);
+  };
+
   useEffect(() => {
     listSports().then(setSports).catch(console.error);
     // Load unfiltered data once for the aggregate dashboard
     getReports({}).then(setAllRows).catch(console.error);
+    loadBudget();
   }, []);
+
+  const saveBudget = async (sportId: string) => {
+    setSavingBudget(sportId);
+    try {
+      const raw = budgetDrafts[sportId]?.trim();
+      const cap = raw === '' || raw == null ? null : Number(raw);
+      await updateSportBudget(sportId, cap);
+      loadBudget();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save budget');
+    } finally {
+      setSavingBudget(null);
+    }
+  };
 
   useEffect(() => {
     const params: Record<string, string> = {};
@@ -106,6 +136,28 @@ export function Reports() {
           </a>
         </div>
       </div>
+
+      {/* ── Tabs ──────────────────────────────────────────────────────────── */}
+      <div className="tab-bar">
+        <button type="button" className={`tab ${tab === 'overview' ? 'tab--active' : ''}`} onClick={() => setTab('overview')}>
+          Pipeline &amp; Requests
+        </button>
+        <button type="button" className={`tab ${tab === 'budget' ? 'tab--active' : ''}`} onClick={() => setTab('budget')}>
+          Budget
+        </button>
+      </div>
+
+      {tab === 'budget' && (
+        <BudgetDashboard
+          budget={budget}
+          drafts={budgetDrafts}
+          onDraftChange={(id, v) => setBudgetDrafts(prev => ({ ...prev, [id]: v }))}
+          onSave={saveBudget}
+          saving={savingBudget}
+        />
+      )}
+
+      {tab === 'overview' && <>
 
       {/* ── Aggregate Pipeline Dashboard ─────────────────────────────────── */}
       <div className="cfo-dashboard-section">
@@ -323,6 +375,97 @@ export function Reports() {
           </table>
         </div>
       )}
+
+      </>}
+    </div>
+  );
+}
+
+// ── Budget dashboard (2.3) ────────────────────────────────────────────────────
+function BudgetDashboard({
+  budget, drafts, onDraftChange, onSave, saving,
+}: {
+  budget: BudgetSportRow[];
+  drafts: Record<string, string>;
+  onDraftChange: (sportId: string, value: string) => void;
+  onSave: (sportId: string) => void;
+  saving: string | null;
+}) {
+  const maxValue = Math.max(1, ...budget.map(b => Math.max(b.committedPremium, b.budgetCap ?? 0)));
+  const totalCommitted = budget.reduce((n, b) => n + b.committedPremium, 0);
+  const totalExecuted = budget.reduce((n, b) => n + b.executedPremium, 0);
+  const totalCap = budget.reduce((n, b) => n + (b.budgetCap ?? 0), 0);
+
+  return (
+    <div className="cfo-dashboard-section">
+      <h2 className="cfo-section-title">Budget Commitment by Sport</h2>
+      <p className="page-subtitle" style={{ marginTop: 0 }}>
+        Committed premium (executed + in-flight) vs. each program's optional cap. The projected figure
+        extrapolates current spend across the full academic year.
+      </p>
+
+      <div className="summary-cards" style={{ marginBottom: '1.25rem' }}>
+        <div className="summary-card"><span className="summary-label">Total Committed</span><span className="summary-value">${totalCommitted.toFixed(2)}</span></div>
+        <div className="summary-card"><span className="summary-label">Total Executed</span><span className="summary-value executed">${totalExecuted.toFixed(2)}</span></div>
+        <div className="summary-card"><span className="summary-label">Total Caps Set</span><span className="summary-value">${totalCap.toFixed(2)}</span></div>
+      </div>
+
+      <div className="table-wrapper">
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Sport</th>
+              <th>Spend vs. Cap</th>
+              <th style={{ textAlign: 'right' }}>Committed</th>
+              <th style={{ textAlign: 'right' }}>Executed</th>
+              <th style={{ textAlign: 'right' }}>Projected (EOY)</th>
+              <th style={{ textAlign: 'right' }}>Remaining</th>
+              <th style={{ width: '180px' }}>Budget Cap ($)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {budget.map(b => {
+              const capPct = b.budgetCap ? Math.min(100, (b.committedPremium / b.budgetCap) * 100) : 0;
+              const barPct = (b.committedPremium / maxValue) * 100;
+              return (
+                <tr key={b.sportId}>
+                  <td style={{ fontWeight: 500 }}>{b.sportName}</td>
+                  <td style={{ minWidth: '160px' }}>
+                    <div className="budget-bar">
+                      <div className={`budget-bar-fill ${b.overBudget ? 'budget-bar-fill--over' : ''}`} style={{ width: `${barPct}%` }} />
+                      {b.budgetCap != null && (
+                        <div className="budget-bar-cap" style={{ left: `${(b.budgetCap / maxValue) * 100}%` }} title={`Cap: $${b.budgetCap.toFixed(2)}`} />
+                      )}
+                    </div>
+                    {b.budgetCap != null && (
+                      <span className="field-hint">{capPct.toFixed(0)}% of cap{b.overBudget ? ' — over budget' : ''}</span>
+                    )}
+                  </td>
+                  <td style={{ textAlign: 'right' }} className={b.overBudget ? 'error' : ''}>${b.committedPremium.toFixed(2)}</td>
+                  <td style={{ textAlign: 'right' }} className="executed">${b.executedPremium.toFixed(2)}</td>
+                  <td style={{ textAlign: 'right' }}>${b.projectedPremium.toFixed(2)}</td>
+                  <td style={{ textAlign: 'right' }}>{b.remaining != null ? `$${b.remaining.toFixed(2)}` : '—'}</td>
+                  <td>
+                    <div style={{ display: 'flex', gap: '6px' }}>
+                      <input
+                        type="number" min="0" step="1"
+                        value={drafts[b.sportId] ?? ''}
+                        onChange={e => onDraftChange(b.sportId, e.target.value)}
+                        placeholder="No cap"
+                        style={{ width: '90px', padding: '.35rem .5rem', border: '1.5px solid var(--gray-200)', borderRadius: 'var(--radius)' }}
+                      />
+                      <button className="btn btn-secondary" style={{ padding: '4px 10px', fontSize: '.8rem' }}
+                        onClick={() => onSave(b.sportId)} disabled={saving === b.sportId}>
+                        {saving === b.sportId ? '…' : 'Save'}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
