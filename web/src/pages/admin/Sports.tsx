@@ -409,8 +409,16 @@ export function AdminSports() {
   );
 }
 
+// Date-only expiries (YYYY-MM-DD) stay active through the end of that day — mirrors the Worker.
+function isDelegationActive(co: Coach): boolean {
+  if (!co.delegatedApproverEmail || !co.delegationExpiresAt) return false;
+  const s = co.delegationExpiresAt;
+  const ms = /^\d{4}-\d{2}-\d{2}$/.test(s) ? Date.parse(`${s}T00:00:00Z`) + 86_400_000 : Date.parse(s);
+  return !isNaN(ms) && ms > Date.now();
+}
+
 function CoachRow({ co, onEdit, onRemove }: { co: Coach; onEdit: (c: Coach) => void; onRemove: (c: Coach) => void }) {
-  const delegationActive = co.delegatedApproverEmail && co.delegationExpiresAt && new Date(co.delegationExpiresAt) > new Date();
+  const delegationActive = isDelegationActive(co);
   return (
     <tr>
       <td style={{ width: '120px' }}>

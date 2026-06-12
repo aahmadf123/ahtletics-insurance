@@ -154,6 +154,19 @@ async function hasAllApprovals(env: Env, id: string, sport: string): Promise<boo
 }
 
 /**
+ * Whether a delegation is still active. A date-only expiry (YYYY-MM-DD from the date
+ * picker) is treated as inclusive of that whole day, so a delegation set to expire on
+ * the last day of travel still routes to the delegate on that day (review feedback).
+ */
+function isDelegationActive(expiresAt: string | null): boolean {
+  if (!expiresAt) return false;
+  const ms = /^\d{4}-\d{2}-\d{2}$/.test(expiresAt)
+    ? Date.parse(`${expiresAt}T00:00:00Z`) + 24 * 60 * 60 * 1000 // through end of that UTC day
+    : Date.parse(expiresAt);
+  return !isNaN(ms) && ms > Date.now();
+}
+
+/**
  * Resolve the Step-1 approver for a sport: the head coach from the coaches table,
  * honouring an active (non-expired) out-of-office delegation (1.1 / 1.8). Falls
  * back to the head coach name/email stored on sports_programs.
@@ -169,11 +182,8 @@ async function getHeadCoachForSport(
     delegated_approver_email: string | null; delegation_expires_at: string | null;
   }>();
   if (hc) {
-    if (hc.delegated_approver_email && hc.delegation_expires_at) {
-      const exp = new Date(hc.delegation_expires_at).getTime();
-      if (!isNaN(exp) && exp > Date.now()) {
-        return { name: hc.display_name, email: hc.delegated_approver_email };
-      }
+    if (hc.delegated_approver_email && isDelegationActive(hc.delegation_expires_at)) {
+      return { name: hc.display_name, email: hc.delegated_approver_email };
     }
     if (hc.email) return { name: hc.display_name, email: hc.email };
   }
@@ -1491,6 +1501,13 @@ app.put('/api/admin/coaches/:id', async c => {
   if (email && !EMAIL_RE.test(email)) return err('Invalid email');
   const delegateEmail = body.delegatedApproverEmail?.trim() || null;
   if (delegateEmail && !EMAIL_RE.test(delegateEmail)) return err('Invalid delegate email');
+
+  // Don't allow directly demoting the current head coach — that would leave the sport with
+  // no Step-1 approver and silently stall future requests. Reassign by promoting another
+  // coach instead (which demotes this one automatically).
+  if (coach.is_head_coach && body.isHeadCoach === false) {
+    return err('To change the head coach, mark another coach as Head Coach instead — that reassigns it automatically.', 409);
+  }
 
   const makeHead = body.isHeadCoach === true && !coach.is_head_coach;
   if (makeHead) {
