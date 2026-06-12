@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, Link, useNavigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, Link, useNavigate, useLocation } from 'react-router-dom';
 import { AuthContext } from './lib/auth';
 import { getMe, selectIdentity as apiSelectIdentity, login as apiLogin, logout as apiLogout } from './lib/api';
 import type { User } from './types';
@@ -19,6 +19,14 @@ import { AdminSettingsPage } from './pages/admin/Settings';
 import { SessionTimeout } from './components/SessionTimeout';
 
 function Nav({ user, onLogout }: { user: User; onLogout: () => void }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const location = useLocation();
+
+  // Close the mobile menu whenever the route changes
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [location.pathname]);
+
   return (
     <nav className="navbar">
       <div className="navbar-brand">
@@ -26,7 +34,24 @@ function Nav({ user, onLogout }: { user: User; onLogout: () => void }) {
           <img src="/logo-dark.png" alt="University of Toledo Athletics" style={{ height: '36px', verticalAlign: 'middle' }} />
         </Link>
       </div>
-      <div className="navbar-links">
+
+      {/* Hamburger — visible only on mobile via CSS */}
+      <button
+        className={`navbar-hamburger${menuOpen ? ' navbar-hamburger--open' : ''}`}
+        onClick={() => setMenuOpen(o => !o)}
+        aria-label="Toggle navigation menu"
+        aria-expanded={menuOpen}
+        aria-controls="navbar-menu"
+      >
+        <span />
+        <span />
+        <span />
+      </button>
+
+      <div
+        id="navbar-menu"
+        className={`navbar-links${menuOpen ? ' navbar-links--open' : ''}`}
+      >
         <Link to="/dashboard">Dashboard</Link>
         {user.role === 'coach' && <Link to="/request/new">New Request</Link>}
         {(user.role === 'cfo' || user.role === 'super_admin') && <Link to="/reports">Reports</Link>}
@@ -34,7 +59,16 @@ function Nav({ user, onLogout }: { user: User; onLogout: () => void }) {
         {(user.role === 'cfo' || user.role === 'super_admin') && <Link to="/admin/users">Users</Link>}
         {user.role === 'super_admin' && <Link to="/admin/sports">Sports &amp; Coaches</Link>}
         {user.role === 'super_admin' && <Link to="/admin/settings">Settings</Link>}
+
+        {/* Mobile-only: user identity + sign-out inside open drawer */}
+        <div className="navbar-mobile-user">
+          <span className="navbar-name">{user.name}</span>
+          <span className="badge">{user.role.replace(/_/g, ' ')}</span>
+          <button className="btn-logout" onClick={onLogout}>Sign Out</button>
+        </div>
       </div>
+
+      {/* Desktop user strip — hidden on mobile via CSS */}
       <div className="navbar-user">
         <span className="navbar-name">{user.name}</span>
         <span className="badge">{user.role.replace(/_/g, ' ')}</span>
