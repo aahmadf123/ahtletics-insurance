@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '../../lib/auth';
-import { listUsers, createUser, deleteUser, approveUser, rejectUser, listSports } from '../../lib/api';
+import { listUsers, createUser, deleteUser, approveUser, rejectUser, listSports, updateUserSports } from '../../lib/api';
 import type { AdminUser } from '../../lib/api';
 import type { SportProgram } from '../../types';
 
@@ -17,8 +17,21 @@ export function AdminUsers() {
   const [newName, setNewName] = useState('');
   const [newRole, setNewRole] = useState('coach');
   const [newSportId, setNewSportId] = useState('');
+  const [newSportIds, setNewSportIds] = useState<Set<string>>(new Set());
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState('');
+
+  // Per-user sport-assignment editing (4.6)
+  const [editingSportsFor, setEditingSportsFor] = useState<string | null>(null);
+  const [editSportIds, setEditSportIds] = useState<Set<string>>(new Set());
+  const [savingSports, setSavingSports] = useState(false);
+
+  const sportName = (id: string) => sports.find(s => s.id === id)?.name ?? id;
+  const toggle = (set: Set<string>, id: string) => {
+    const next = new Set(set);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  };
 
   const refresh = useCallback(() => {
     setLoading(true);
@@ -61,6 +74,9 @@ export function AdminUsers() {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (newRole === 'sport_admin' && newSportIds.size === 0) {
+      setCreateError('Select at least one sport for this Sport Admin'); return;
+    }
     setCreating(true);
     setCreateError('');
     try {
@@ -70,14 +86,36 @@ export function AdminUsers() {
         name: newName.trim(),
         role: newRole,
         sportId: newRole === 'coach' && newSportId ? newSportId : undefined,
+        sportIds: newRole === 'sport_admin' ? [...newSportIds] : undefined,
       });
       setUsers(prev => [...prev, created]);
       setShowForm(false);
-      setNewEmail(''); setNewPassword(''); setNewName(''); setNewRole('coach'); setNewSportId('');
+      setNewEmail(''); setNewPassword(''); setNewName(''); setNewRole('coach'); setNewSportId(''); setNewSportIds(new Set());
     } catch (err: unknown) {
       setCreateError(err instanceof Error ? err.message : 'Failed to create user');
     } finally {
       setCreating(false);
+    }
+  };
+
+  const startEditSports = (u: AdminUser) => {
+    setEditingSportsFor(u.id);
+    setEditSportIds(new Set(u.sportIds ?? []));
+    setError('');
+  };
+
+  const handleSaveSports = async (id: string) => {
+    if (editSportIds.size === 0) { setError('Select at least one sport'); return; }
+    setSavingSports(true);
+    setError('');
+    try {
+      await updateUserSports(id, [...editSportIds]);
+      setUsers(prev => prev.map(u => u.id === id ? { ...u, sportIds: [...editSportIds] } : u));
+      setEditingSportsFor(null);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to update sports');
+    } finally {
+      setSavingSports(false);
     }
   };
 
@@ -139,6 +177,19 @@ export function AdminUsers() {
               </select>
             </div>
           )}
+          {newRole === 'sport_admin' && (
+            <div className="field">
+              <label>Sports Administered * (select all that apply)</label>
+              <div className="checkbox-grid">
+                {sports.map(s => (
+                  <label key={s.id} className={`checkbox-chip ${newSportIds.has(s.id) ? 'checkbox-chip--checked' : ''}`}>
+                    <input type="checkbox" checked={newSportIds.has(s.id)} onChange={() => setNewSportIds(prev => toggle(prev, s.id))} />
+                    <span>{s.name}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
           {createError && <p className="error">{createError}</p>}
           <button type="submit" className="btn btn-primary" disabled={creating}>
             {creating ? 'Creating…' : 'Create User'}
@@ -195,7 +246,7 @@ export function AdminUsers() {
         <div className="table-wrapper">
           <table className="data-table">
             <thead>
-              <tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Sport</th><th>Created</th><th></th></tr>
+              <tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Sports</th><th>Created</th><th></th></tr>
             </thead>
             <tbody>
               {activeUsers.map(u => (
@@ -208,7 +259,41 @@ export function AdminUsers() {
                       {u.status ?? 'active'}
                     </span>
                   </td>
-                  <td>{sports.find(s => s.id === u.sportId)?.name ?? '—'}</td>
+                  <td>
+                    {u.role === 'sport_admin' ? (
+                      editingSportsFor === u.id ? (
+                        <div>
+                          <div className="checkbox-grid" style={{ marginBottom: '.5rem' }}>
+                            {sports.map(s => (
+                              <label key={s.id} className={`checkbox-chip ${editSportIds.has(s.id) ? 'checkbox-chip--checked' : ''}`}>
+                                <input type="checkbox" checked={editSportIds.has(s.id)} onChange={() => setEditSportIds(prev => toggle(prev, s.id))} />
+                                <span>{s.name}</span>
+                              </label>
+                            ))}
+                          </div>
+                          <div style={{ display: 'flex', gap: '8px' }}>
+                            <button className="btn btn-primary" style={{ padding: '4px 12px', fontSize: '.8rem' }}
+                              onClick={() => handleSaveSports(u.id)} disabled={savingSports}>
+                              {savingSports ? 'Saving…' : 'Save'}
+                            </button>
+                            <button className="btn btn-secondary" style={{ padding: '4px 12px', fontSize: '.8rem' }}
+                              onClick={() => setEditingSportsFor(null)}>Cancel</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <span>
+                          {u.sportIds && u.sportIds.length > 0
+                            ? u.sportIds.map(sportName).join(', ')
+                            : <span className="muted">None</span>}
+                          {' '}
+                          <button className="link" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--blue)' }}
+                            onClick={() => startEditSports(u)}>Edit</button>
+                        </span>
+                      )
+                    ) : (
+                      sports.find(s => s.id === u.sportId)?.name ?? '—'
+                    )}
+                  </td>
                   <td>{new Date(u.createdAt).toLocaleDateString()}</td>
                   <td>
                     {u.email !== user?.email && (

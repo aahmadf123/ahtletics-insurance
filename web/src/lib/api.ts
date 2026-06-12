@@ -4,6 +4,7 @@ import type {
   RequestDetail,
   SportProgram,
   SportAdmin,
+  Coach,
   BulkSubmitPayload,
   ReportRow,
 } from '../types';
@@ -50,7 +51,7 @@ export function login(email: string, password: string) {
   });
 }
 
-export function register(data: { email: string; password: string; name: string; role: string }) {
+export function register(data: { email: string; password: string; name: string; role: string; sportIds?: string[] }) {
   return request<{ message: string }>('/auth/register', {
     method: 'POST',
     body: JSON.stringify(data),
@@ -129,6 +130,55 @@ export function voidRequest(id: string, reason: string) {
   });
 }
 
+export function denyRequest(id: string, reason: string) {
+  return request<{ id: string; status: string }>(`/api/requests/${id}/deny`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  });
+}
+
+export interface ResubmitOverrides {
+  studentName?: string;
+  rocketNumber?: string;
+  studentEmail?: string;
+  term?: string;
+  fundingSource?: string;
+  coachName?: string;
+  coachEmail?: string;
+}
+
+export function resubmitRequest(id: string, overrides?: ResubmitOverrides) {
+  return request<{ id: string; status: string; parentRequestId: string }>(`/api/requests/${id}/resubmit`, {
+    method: 'POST',
+    body: JSON.stringify(overrides ?? {}),
+  });
+}
+
+export interface BulkImportRow {
+  studentName: string;
+  rocketNumber: string;
+  email?: string;
+  sport: string;
+  term: string;
+  fundingSource?: string;
+  coachName?: string;
+  coachEmail?: string;
+}
+
+export interface BulkImportResult {
+  submitted: number;
+  skippedCount: number;
+  created: { id: string; studentName: string; rocketNumber: string }[];
+  skipped: { row: number; studentName: string; reason: string }[];
+}
+
+export function bulkImportRequests(rows: BulkImportRow[]) {
+  return request<BulkImportResult>('/api/requests/bulk', {
+    method: 'POST',
+    body: JSON.stringify({ rows }),
+  });
+}
+
 export function deleteRequest(id: string) {
   return request<void>(`/api/requests/${id}`, { method: 'DELETE' });
 }
@@ -144,6 +194,56 @@ export function getReportsCsvUrl(params?: Record<string, string>) {
   return `/api/reports/csv${qs}`;
 }
 
+// Reports — budget dashboard (2.3)
+export interface BudgetSportRow {
+  sportId: string;
+  sportName: string;
+  budgetCap: number | null;
+  executedPremium: number;
+  committedPremium: number;
+  executedCount: number;
+  projectedPremium: number;
+  remaining: number | null;
+  overBudget: boolean;
+}
+
+export function getBudgetReport() {
+  return request<{ sports: BudgetSportRow[]; elapsedFraction: number }>('/api/reports/budget');
+}
+
+export function updateSportBudget(sportId: string, budgetCap: number | null) {
+  return request<{ ok: boolean; budgetCap: number | null }>(`/api/admin/sports/${sportId}/budget`, {
+    method: 'PUT',
+    body: JSON.stringify({ budgetCap }),
+  });
+}
+
+// Audit log (3.3)
+export interface AuditEntry {
+  id: string;
+  requestId: string | null;
+  action: string;
+  actor: string;
+  details: string | null;
+  ipAddress: string | null;
+  timestamp: string;
+  studentName: string | null;
+  rocketNumber: string | null;
+  sportName: string | null;
+}
+
+export function listAudit(params?: Record<string, string>) {
+  const clean = params ? Object.fromEntries(Object.entries(params).filter(([, v]) => v)) : {};
+  const qs = Object.keys(clean).length ? '?' + new URLSearchParams(clean).toString() : '';
+  return request<AuditEntry[]>(`/api/audit${qs}`);
+}
+
+export function getAuditCsvUrl(params?: Record<string, string>) {
+  const clean = params ? Object.fromEntries(Object.entries(params).filter(([, v]) => v)) : {};
+  const qs = Object.keys(clean).length ? '?' + new URLSearchParams(clean).toString() : '';
+  return `/api/audit/csv${qs}`;
+}
+
 // Admin — users
 export interface AdminUser {
   id: string;
@@ -151,6 +251,7 @@ export interface AdminUser {
   name: string;
   role: string;
   sportId?: string;
+  sportIds?: string[]; // sport-admin assignments (4.6)
   mustChangePassword: number;
   status?: string;
   createdAt: string;
@@ -166,10 +267,18 @@ export function createUser(data: {
   name: string;
   role: string;
   sportId?: string;
+  sportIds?: string[];
 }) {
   return request<AdminUser>('/api/admin/users', {
     method: 'POST',
     body: JSON.stringify(data),
+  });
+}
+
+export function updateUserSports(userId: string, sportIds: string[]) {
+  return request<{ ok: boolean; sportIds: string[] }>(`/api/admin/users/${userId}/sports`, {
+    method: 'PUT',
+    body: JSON.stringify({ sportIds }),
   });
 }
 
@@ -221,4 +330,36 @@ export function updateSportAdmin(sportId: string, adminId: string | null) {
     method: 'PUT',
     body: JSON.stringify({ adminId }),
   });
+}
+
+// Coaches (multi-staff per sport, 4.3)
+export function listSportCoaches(sportId: string) {
+  return request<Coach[]>(`/api/sports/${sportId}/coaches`);
+}
+
+export interface CoachInput {
+  displayName: string;
+  email: string;
+  title?: string;
+  isHeadCoach?: boolean;
+  delegatedApproverEmail?: string | null;
+  delegationExpiresAt?: string | null;
+}
+
+export function createCoach(sportId: string, data: CoachInput) {
+  return request<Coach>(`/api/admin/sports/${sportId}/coaches`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function updateCoach(coachId: string, data: Partial<CoachInput>) {
+  return request<{ ok: boolean }>(`/api/admin/coaches/${coachId}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteCoach(coachId: string) {
+  return request<{ ok: boolean }>(`/api/admin/coaches/${coachId}`, { method: 'DELETE' });
 }

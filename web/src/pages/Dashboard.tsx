@@ -6,10 +6,10 @@ import { StatusBadge } from '../components/StatusBadge';
 import type { InsuranceRequest, SportProgram, RequestStatus } from '../types';
 
 const ALL_STATUSES: RequestStatus[] = [
-  'PENDING_COACH', 'PENDING_APPROVAL', 'EXECUTED', 'VOIDED', 'EXPIRED',
+  'PENDING_COACH', 'PENDING_APPROVAL', 'EXECUTED', 'DENIED', 'VOIDED', 'EXPIRED',
 ];
 
-const TERM_LABELS = ['Fall', 'Spring/Summer', 'Summer'];
+const TERM_LABELS = ['Fall', 'Spring/Summer', 'Summer', 'Full Year'];
 
 export function Dashboard() {
   const { user } = useAuth();

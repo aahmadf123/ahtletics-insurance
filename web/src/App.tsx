@@ -12,8 +12,10 @@ import { Dashboard } from './pages/Dashboard';
 import { NewRequest } from './pages/request/New';
 import { RequestDetail } from './pages/request/Detail';
 import { Reports } from './pages/Reports';
+import { AuditLog } from './pages/AuditLog';
 import { AdminUsers } from './pages/admin/Users';
 import { AdminSports } from './pages/admin/Sports';
+import { SessionTimeout } from './components/SessionTimeout';
 
 function Nav({ user, onLogout }: { user: User; onLogout: () => void }) {
   return (
@@ -27,6 +29,7 @@ function Nav({ user, onLogout }: { user: User; onLogout: () => void }) {
         <Link to="/dashboard">Dashboard</Link>
         {user.role === 'coach' && <Link to="/request/new">New Request</Link>}
         {(user.role === 'cfo' || user.role === 'super_admin') && <Link to="/reports">Reports</Link>}
+        {(user.role === 'cfo' || user.role === 'super_admin') && <Link to="/audit">Audit Log</Link>}
         {(user.role === 'cfo' || user.role === 'super_admin') && <Link to="/admin/users">Users</Link>}
         {user.role === 'super_admin' && <Link to="/admin/sports">Sports &amp; Coaches</Link>}
       </div>
@@ -78,6 +81,7 @@ function AppLayout() {
   return (
     <AuthContext.Provider value={{ user, loading, selectIdentity, login, logout, refresh }}>
       {user && <Nav user={user} onLogout={logout} />}
+      {user && <SessionTimeout onTimeout={logout} />}
       <main className="main-content">
         <Routes>
           <Route path="/login" element={user ? <Navigate to="/dashboard" replace /> : <Login />} />
@@ -95,6 +99,9 @@ function AppLayout() {
           } />
           <Route path="/reports" element={
             !user ? <Navigate to="/login" replace /> : <Reports />
+          } />
+          <Route path="/audit" element={
+            !user ? <Navigate to="/login" replace /> : <AuditLog />
           } />
           <Route path="/admin/users" element={
             !user ? <Navigate to="/login" replace /> : <AdminUsers />

@@ -15,6 +15,7 @@ export type RequestStatus =
   | 'PENDING_APPROVAL'
   | 'EXECUTED'
   | 'VOIDED'
+  | 'DENIED'
   | 'EXPIRED';
 
 export type FundingSource = 'operating_budget' | 'foundation_account';
@@ -42,9 +43,12 @@ export interface InsuranceRequest {
   coachEmail?: string;
   coachName: string;
   createdAt: string;
+  denialReason?: string;
+  parentRequestId?: string;
   // Derived approval flags (parallel approval model)
   sportAdminSigned?: boolean;
   cfoSigned?: boolean;
+  headCoachSigned?: boolean;
 }
 
 export interface Signature {
@@ -71,6 +75,19 @@ export interface SportProgram {
   sportAdminId?: string;
   sportAdminName?: string;
   sportAdminEmail?: string;
+  budgetCap?: number | null;
+  staffCount?: number; // number of non-head staff coaches
+}
+
+export interface Coach {
+  id: string;
+  displayName: string;
+  email: string;
+  sportId: string;
+  title?: string;
+  isHeadCoach: number; // 0 | 1
+  delegatedApproverEmail?: string | null;
+  delegationExpiresAt?: string | null;
 }
 
 export interface SportAdmin {
@@ -92,6 +109,7 @@ export const TERM_OPTIONS: TermOption[] = [
   { label: 'Fall', value: 'Fall', premium: 898.0, deadline: 'September 8' },
   { label: 'Spring/Summer', value: 'Spring/Summer', premium: 1394.0, deadline: 'January 26' },
   { label: 'Summer', value: 'Summer', premium: 546.0, deadline: 'July 1' },
+  { label: 'Full Year', value: 'Full Year', premium: 2292.0, deadline: 'September 8' },
 ];
 
 export interface AthleteEntry {
@@ -109,6 +127,8 @@ export interface BulkSubmitPayload {
   sport: string;
   fundingSource: FundingSource;
   coachEmail?: string;
+  coachName?: string;
+  parentRequestId?: string;
 }
 
 export interface ReportRow {

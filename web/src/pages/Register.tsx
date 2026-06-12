@@ -1,17 +1,33 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { register } from '../lib/api';
+import { register, listSports } from '../lib/api';
+import type { SportProgram } from '../types';
 
 export function Register() {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState('sport_admin');
+  const [sports, setSports] = useState<SportProgram[]>([]);
+  const [sportIds, setSportIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [submitted, setSubmitted] = useState(false);
 
-  const canSubmit = name.trim() && email.trim() && password.length >= 8;
+  useEffect(() => {
+    listSports().then(setSports).catch(() => {});
+  }, []);
+
+  const toggleSport = (id: string) => {
+    setSportIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const needsSports = role === 'sport_admin';
+  const canSubmit = name.trim() && email.trim() && password.length >= 8 && (!needsSports || sportIds.size > 0);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -19,7 +35,10 @@ export function Register() {
     setError('');
     setLoading(true);
     try {
-      await register({ name: name.trim(), email: email.trim(), password, role });
+      await register({
+        name: name.trim(), email: email.trim(), password, role,
+        sportIds: needsSports ? [...sportIds] : undefined,
+      });
       setSubmitted(true);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Registration failed');
@@ -116,6 +135,21 @@ export function Register() {
                 <option value="cfo">CFO</option>
               </select>
             </div>
+
+            {needsSports && (
+              <div className="field">
+                <label>Sports You Administer * (select all that apply)</label>
+                <div className="checkbox-grid">
+                  {sports.map(s => (
+                    <label key={s.id} className={`checkbox-chip ${sportIds.has(s.id) ? 'checkbox-chip--checked' : ''}`}>
+                      <input type="checkbox" checked={sportIds.has(s.id)} onChange={() => toggleSport(s.id)} />
+                      <span>{s.name}</span>
+                    </label>
+                  ))}
+                </div>
+                {sports.length === 0 && <span className="field-hint">Loading sports…</span>}
+              </div>
+            )}
 
             {error && <p className="error">{error}</p>}
 

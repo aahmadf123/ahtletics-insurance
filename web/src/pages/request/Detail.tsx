@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../../lib/auth';
-import { getRequest, voidRequest, signRequest, getRequestPdfUrl, deleteRequest } from '../../lib/api';
+import { getRequest, voidRequest, signRequest, getRequestPdfUrl, deleteRequest, denyRequest } from '../../lib/api';
 import { StatusBadge } from '../../components/StatusBadge';
 import { fundingSourceLabel } from '../../types';
 import type { RequestDetail } from '../../types';
@@ -16,6 +16,9 @@ export function RequestDetail() {
   const [voiding, setVoiding] = useState(false);
   const [voidReason, setVoidReason] = useState('');
   const [showVoidForm, setShowVoidForm] = useState(false);
+  const [denying, setDenying] = useState(false);
+  const [denyReason, setDenyReason] = useState('');
+  const [showDenyForm, setShowDenyForm] = useState(false);
   const [showConfirmSign, setShowConfirmSign] = useState(false);
   const [showPdfPreview, setShowPdfPreview] = useState(false);
   const [showConfirmDelete, setShowConfirmDelete] = useState(false);
@@ -85,17 +88,48 @@ export function RequestDetail() {
     }
   };
 
+  const handleDeny = async () => {
+    if (!id || !denyReason.trim()) return;
+    setDenying(true);
+    setError('');
+    try {
+      await denyRequest(id, denyReason.trim());
+      navigate('/dashboard');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Deny failed');
+      setDenying(false);
+    }
+  };
+
+  // Re-open the request form pre-populated with this request's data so the coach can
+  // fix the issue and resubmit as a new, linked request (1.5).
+  const handleResubmit = () => {
+    if (!req) return;
+    navigate('/request/new', { state: { resubmit: { ...req, parentRequestId: req.id } } });
+  };
+
   if (loading) return <div className="page"><p className="muted">Loading…</p></div>;
   if (!req) return <div className="page"><p className="error">{error || 'Request not found.'}</p></div>;
 
   // Parallel approval: Sport Admin and CFO may approve in any order; each can sign
   // only if their own approval is still outstanding.
   const awaitingApproval = req.status === 'PENDING_APPROVAL';
+  const isPending = req.status === 'PENDING_COACH' || req.status === 'PENDING_APPROVAL';
   const canSign =
     (user?.role === 'coach' && req.status === 'PENDING_COACH') ||
     (user?.role === 'sport_admin' && awaitingApproval && !req.sportAdminSigned) ||
     (user?.role === 'cfo' && awaitingApproval && !req.cfoSigned) ||
     (user?.role === 'super_admin' && awaitingApproval && (!req.sportAdminSigned || !req.cfoSigned));
+
+  // The head coach denies at their step; the Sport Admin denies at the approval step;
+  // Super Admin can deny while pending. The CFO's terminal action is Void, not Deny.
+  // Denial requires a written reason (1.4).
+  const canDeny =
+    (user?.role === 'coach' && req.status === 'PENDING_COACH') ||
+    (user?.role === 'sport_admin' && awaitingApproval) ||
+    (user?.role === 'super_admin' && isPending);
+
+  const canResubmit = req.status === 'DENIED' && (user?.role === 'coach' || user?.role === 'super_admin');
 
   const hasSomeSignatures = req.signatures.length > 0;
 
@@ -107,6 +141,23 @@ export function RequestDetail() {
       </div>
 
       <h1>Insurance Request — {req.studentName}</h1>
+
+      {req.status === 'DENIED' && (
+        <div className="action-zone action-zone--danger" style={{ marginTop: 0, marginBottom: '1rem' }}>
+          <h2 style={{ marginTop: 0 }}>This request was denied</h2>
+          {req.denialReason && (
+            <p style={{ margin: '0 0 .75rem' }}><strong>Reason:</strong> {req.denialReason}</p>
+          )}
+          {canResubmit && (
+            <>
+              <p className="action-note">
+                You can correct the issue and resubmit. A new request will be created and linked to this one for the audit trail.
+              </p>
+              <button className="btn btn-primary" onClick={handleResubmit}>Fix &amp; Resubmit</button>
+            </>
+          )}
+        </div>
+      )}
 
       <div className="detail-grid">
         <div className="form-card">
@@ -276,7 +327,41 @@ export function RequestDetail() {
         </div>
       )}
 
-      {(user?.role === 'cfo' || user?.role === 'super_admin') && req.status === 'PENDING_APPROVAL' && (
+      {canDeny && (
+        <div className="action-zone action-zone--danger">
+          {!showDenyForm ? (
+            <>
+              <p className="action-note">
+                If this request can't be approved as submitted, deny it with a reason. The coach will be notified and can fix &amp; resubmit.
+              </p>
+              <button className="btn btn-danger" onClick={() => setShowDenyForm(true)}>
+                Deny This Request
+              </button>
+            </>
+          ) : (
+            <div className="void-form">
+              <label htmlFor="deny-reason">Reason for denial (required)</label>
+              <textarea
+                id="deny-reason"
+                value={denyReason}
+                onChange={e => setDenyReason(e.target.value)}
+                rows={3}
+                placeholder="Explain what needs to be corrected…"
+              />
+              <div className="void-actions">
+                <button className="btn btn-danger" onClick={handleDeny} disabled={denying || !denyReason.trim()}>
+                  {denying ? 'Denying…' : 'Confirm Denial'}
+                </button>
+                <button className="btn btn-secondary" onClick={() => { setShowDenyForm(false); setDenyReason(''); }}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {(user?.role === 'cfo' || user?.role === 'super_admin') && (req.status === 'PENDING_APPROVAL' || req.status === 'PENDING_COACH') && (
         <div className="action-zone action-zone--danger">
           {!showVoidForm ? (
             <button className="btn btn-danger" onClick={() => setShowVoidForm(true)}>
