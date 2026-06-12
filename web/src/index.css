@@ -284,12 +284,6 @@ code {
     display: none;
   }
 }
-  align-items: center;
-  gap: .6rem;
-  margin-left: auto;
-  font-size: .82rem;
-  flex-wrap: wrap;
-}
 
 .navbar-name {
   color: rgba(255, 255, 255, .9);
