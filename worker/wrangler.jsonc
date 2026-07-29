@@ -44,7 +44,7 @@
     // resend._domainkey.mail.utrockets-insurance.com and its Return-Path/SPF at
     // send.mail.utrockets-insurance.com. Sending from any other domain makes Resend
     // reject the request outright. See EMAIL_SETUP.md.
-    "FROM_NAME": "UToledo Athletics Business Office",
+    "FROM_NAME": "Toledo Athletics Business Office",
     "FROM_EMAIL": "noreply@mail.utrockets-insurance.com",
 
     // A monitored mailbox. Mail with no working reply path scores badly with filters,
@@ -86,7 +86,7 @@
       // exercising the submit or approve flow cannot mail a real coach or student-athlete.
       // Adding that secret to the preview Worker would undo it.
       "vars": {
-        "FROM_NAME": "UToledo Athletics Business Office (preview)",
+        "FROM_NAME": "Toledo Athletics Business Office (preview)",
         "FROM_EMAIL": "noreply@mail.utrockets-insurance.com",
         "REPLY_TO_EMAIL": "athletics-insurance@utrockets-insurance.com",
         "CFO_EMAIL": "melissa.deangelo@utoledo.edu",

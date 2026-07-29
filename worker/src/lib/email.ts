@@ -84,12 +84,21 @@ export function bytesToBase64(bytes: Uint8Array): string {
 // The remaining half of the fix is DNS: SPF, DKIM, and strictly aligned DMARC on a
 // dedicated sending subdomain. See EMAIL_SETUP.md.
 
-const FOOTER_TEXT =
+// Two footers, because one sentence cannot honestly describe both kinds of message.
+// Telling someone resetting a password that they are "named on this insurance request"
+// is false, and on a mail that already asks them to click a link and change a credential
+// it reads exactly like the incoherence a phishing filter is looking for.
+const FOOTER_REQUEST =
   'University of Toledo Athletics, Health Insurance Request System. '
   + 'You are receiving this because you are named on this insurance request.';
 
+const FOOTER_ACCOUNT =
+  'University of Toledo Athletics, Health Insurance Request System. '
+  + 'You are receiving this because an account exists for this address.';
+
 function emailHtml(
   env: Env, title: string, body: string, actionLink?: string, actionLabel?: string,
+  footer: string = FOOTER_REQUEST,
 ): string {
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body style="font-family:-apple-system,Segoe UI,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">
@@ -98,7 +107,7 @@ ${body}
 ${actionLink ? `<p style="margin-top:20px"><a href="${actionLink}" style="background:#003DA5;color:#ffffff;padding:10px 20px;border-radius:6px;text-decoration:none;display:inline-block">${escapeHtml(actionLabel ?? 'View Request')}</a></p>
 <p style="font-size:13px;color:#555">Or open this address directly:<br/><span style="word-break:break-all">${escapeHtml(actionLink)}</span></p>` : ''}
 <hr style="margin-top:30px;border:none;border-top:1px solid #eee"/>
-<p style="color:#888;font-size:12px">${escapeHtml(FOOTER_TEXT)}<br/>
+<p style="color:#888;font-size:12px">${escapeHtml(footer)}<br/>
 Questions: <a href="mailto:${escapeHtml(env.REPLY_TO_EMAIL || env.CFO_EMAIL)}">${escapeHtml(env.REPLY_TO_EMAIL || env.CFO_EMAIL)}</a></p>
 </body></html>`;
 }
@@ -107,10 +116,13 @@ Questions: <a href="mailto:${escapeHtml(env.REPLY_TO_EMAIL || env.CFO_EMAIL)}">$
  * Plain-text counterpart, built from the same inputs as the HTML rather than by
  * stripping tags, so the two parts cannot drift apart.
  */
-function emailText(env: Env, title: string, lines: string[], actionLink?: string): string {
+function emailText(
+  env: Env, title: string, lines: string[], actionLink?: string,
+  actionLabel: string = 'Open the request', footer: string = FOOTER_REQUEST,
+): string {
   const out = [title, '', ...lines];
-  if (actionLink) out.push('', `Open the request: ${actionLink}`);
-  out.push('', '---', FOOTER_TEXT, `Questions: ${env.REPLY_TO_EMAIL || env.CFO_EMAIL}`);
+  if (actionLink) out.push('', `${actionLabel}: ${actionLink}`);
+  out.push('', '---', footer, `Questions: ${env.REPLY_TO_EMAIL || env.CFO_EMAIL}`);
   return out.join('\n');
 }
 
@@ -480,8 +492,8 @@ export async function notifyPasswordReset(
   const closing = 'This link expires in one hour and can be used once. If you did not request a reset, you can ignore this message and your password will stay unchanged.';
   await sendEmail(
     env, to, subject,
-    emailHtml(env, subject, `<p>Hi ${escapeHtml(name)},</p><p>${intro}</p><p style="color:#666;font-size:14px">${closing}</p>`, link, 'Reset my password'),
-    emailText(env, subject, [`Hi ${name},`, '', intro, '', closing], link),
+    emailHtml(env, subject, `<p>Hi ${escapeHtml(name)},</p><p>${intro}</p><p style="color:#666;font-size:14px">${closing}</p>`, link, 'Reset my password', FOOTER_ACCOUNT),
+    emailText(env, subject, [`Hi ${name},`, '', intro, '', closing], link, 'Open this link', FOOTER_ACCOUNT),
     { template: 'notifyPasswordReset' },
   );
 }
@@ -517,14 +529,14 @@ export async function notifyAccountCreated(
       + `<td style="${cell}"><code style="font-size:15px">${escapeHtml(tempPassword)}</code></td></tr>`
       + `</table>`
       + `<p style="color:#666;font-size:14px">${escapeHtml(closing)}</p>`,
-      link, 'Sign in',
+      link, 'Sign in', FOOTER_ACCOUNT,
     ),
     emailText(env, subject, [
       `Hi ${name},`, '', intro, '',
       `Email: ${to}`,
       `Temporary password: ${tempPassword}`,
       '', closing,
-    ], link),
+    ], link, 'Sign in here', FOOTER_ACCOUNT),
     { template: 'notifyAccountCreated' },
   );
 }
@@ -542,8 +554,8 @@ export async function notifyRegistrationDecision(
   const link = approved ? `${env.APP_BASE_URL.replace(/\/$/, '')}/login` : undefined;
   await sendEmail(
     env, to, subject,
-    emailHtml(env, subject, `<p>Hi ${escapeHtml(name)},</p><p>${escapeHtml(intro)}</p>`, link, 'Sign in'),
-    emailText(env, subject, [`Hi ${name},`, '', intro], link),
+    emailHtml(env, subject, `<p>Hi ${escapeHtml(name)},</p><p>${escapeHtml(intro)}</p>`, link, 'Sign in', FOOTER_ACCOUNT),
+    emailText(env, subject, [`Hi ${name},`, '', intro], link, 'Sign in here', FOOTER_ACCOUNT),
     { template: approved ? 'notifyRegistrationApproved' : 'notifyRegistrationRejected' },
   );
 }

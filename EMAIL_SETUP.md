@@ -114,7 +114,7 @@ Inbound MX on the apex does not affect outbound sending: that is governed by the
 `app_settings` table, which takes precedence at send time.
 
 ```jsonc
-"FROM_NAME":       "UToledo Athletics Business Office",
+"FROM_NAME":       "Toledo Athletics Business Office",
 "FROM_EMAIL":      "noreply@mail.utrockets-insurance.com",
 "REPLY_TO_EMAIL":  "athletics-insurance@utrockets-insurance.com",
 "CFO_EMAIL":       "melissa.deangelo@utoledo.edu",
