@@ -7,8 +7,8 @@ import {
 import {
   notifyPendingSportAdmin, notifyPendingCFO, notifyExecuted, notifyVoided, notifyReminder,
   notifyCoachSubmitted, notifyStudentSubmitted, notifyPendingHeadCoach, notifyDenied,
-  notifyExpired, notifyPasswordReset, notifyRegistrationDecision, buildApprovalIcs,
-  bytesToBase64, type EmailData, type EmailAttachment,
+  notifyExpired, notifyPasswordReset, notifyRegistrationDecision, notifyAccountCreated,
+  buildApprovalIcs, bytesToBase64, type EmailData, type EmailAttachment,
 } from './lib/email';
 import {
   validateRocketNumber, isBeforeDeadline, getPremiumForTerm, getSubmissionDeadline,
@@ -944,9 +944,16 @@ app.get('/api/sports', async c => {
 app.get('/api/admin/sport-admins', async c => {
   const user = await currentUser(c);
   if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
-  const { results } = await c.env.DB.prepare(
-    'SELECT id, name, title, email, is_cfo as isCfo FROM sport_administrators ORDER BY name'
-  ).all();
+  // Rows mirrored from a user account share that account's id, so they can be joined back
+  // and suppressed once the account is deactivated or rejected. The original seeded
+  // administrators have no matching user row and are always listed.
+  const { results } = await c.env.DB.prepare(`
+    SELECT sa.id, sa.name, sa.title, sa.email, sa.is_cfo as isCfo
+    FROM sport_administrators sa
+    LEFT JOIN users u ON u.id = sa.id
+    WHERE u.id IS NULL OR u.status = 'active'
+    ORDER BY sa.name
+  `).all();
   return json(results);
 });
 
@@ -1751,6 +1758,43 @@ app.post('/api/admin/users', async c => {
 
   if (role === 'sport_admin') await setSportAdminAssignments(c.env, id, sportIds ?? []);
 
+  // Mirror the account into sport_administrators.
+  //
+  // Two parallel models exist: sports_programs.sport_admin_id references this table,
+  // while login accounts live in users and reach sports through sport_admin_assignments.
+  // The Sports page picker reads sport_administrators, so without a row here a newly
+  // created administrator cannot be assigned to a sport at all. Reusing the user's id as
+  // the primary key keeps the two sides joinable, which is what lets the picker filter on
+  // account status and lets deletion clean up both.
+  if (role === 'sport_admin' || role === 'cfo') {
+    // A seeded administrator may already exist for this person under a slug id that sports
+    // already reference. Giving them a login must not add a second entry to the picker, so
+    // the existing row is left as the canonical one. Re-pointing it at the new id would
+    // mean rewriting every sports_programs.sport_admin_id that references it, which is the
+    // riskier half of the trade for no visible gain.
+    const existing = await c.env.DB.prepare(
+      'SELECT id FROM sport_administrators WHERE lower(email) = ?'
+    ).bind(email.toLowerCase()).first<{ id: string }>();
+
+    if (!existing) {
+      await c.env.DB.prepare(
+        'INSERT INTO sport_administrators (id, name, title, email, is_cfo) VALUES (?, ?, ?, ?, ?)'
+      ).bind(
+        id, name,
+        role === 'cfo' ? 'Chief Financial Officer' : 'Sport Administrator',
+        email.toLowerCase(), role === 'cfo' ? 1 : 0,
+      ).run();
+    }
+  }
+
+  // Best-effort: the account exists whether or not the message lands, and the outcome is
+  // recorded in email_log either way.
+  const roleLabel = role === 'super_admin' ? 'a Super Admin'
+    : role === 'cfo' ? 'the Chief Financial Officer'
+    : role === 'sport_admin' ? 'a Sport Administrator'
+    : 'a Coach';
+  deferNotify(c, mailEnv => notifyAccountCreated(mailEnv, email.toLowerCase(), name, password, roleLabel));
+
   return json({ id, email: email.toLowerCase(), name, role, sportId: sportId ?? null, sportIds: role === 'sport_admin' ? (sportIds ?? []) : [], mustChangePassword: 1, status: 'active', createdAt: new Date().toISOString() }, 201);
 });
 
@@ -1786,11 +1830,24 @@ app.delete('/api/admin/users/:id', async c => {
     return err('You cannot delete an account at or above your own permission level', 403);
   }
 
+  // Sports pointing at this account's mirrored administrator row have to be detached
+  // before it goes, or they keep a dangling sport_admin_id and the Sports page renders a
+  // blank administrator. Captured first so single_approval can be recomputed after.
+  const { results: orphaned } = await c.env.DB.prepare(
+    'SELECT id FROM sports_programs WHERE sport_admin_id = ?'
+  ).bind(id).all<{ id: string }>();
+
   await c.env.DB.batch([
     c.env.DB.prepare('DELETE FROM sport_admin_assignments WHERE admin_user_id = ?').bind(id),
     c.env.DB.prepare('DELETE FROM password_reset_tokens WHERE user_id = ?').bind(id),
+    c.env.DB.prepare('UPDATE sports_programs SET sport_admin_id = NULL WHERE sport_admin_id = ?').bind(id),
+    c.env.DB.prepare('DELETE FROM sport_administrators WHERE id = ?').bind(id),
     c.env.DB.prepare('DELETE FROM users WHERE id = ?').bind(id),
   ]);
+
+  // Losing a CFO administrator means those sports no longer finalize on one signature.
+  for (const s of orphaned) await syncSingleApproval(c.env, s.id);
+
   return json({ ok: true });
 });
 

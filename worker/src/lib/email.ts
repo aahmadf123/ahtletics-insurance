@@ -486,6 +486,49 @@ export async function notifyPasswordReset(
   );
 }
 
+/**
+ * Credentials for an account an administrator created on someone's behalf.
+ *
+ * The password is sent in plaintext because there is no other channel to reach a person
+ * who does not yet have an account. It is safe only because it is genuinely temporary:
+ * `must_change_password` is set at creation and the `/api/*` gate in index.ts rejects
+ * every call from that account until a new password is chosen, so an intercepted message
+ * yields a credential that cannot be used for anything except setting a new one.
+ */
+export async function notifyAccountCreated(
+  env: Env, to: string, name: string, tempPassword: string, roleLabel: string,
+): Promise<void> {
+  const link = `${env.APP_BASE_URL.replace(/\/$/, '')}/login`;
+  const subject = 'Your Athletics Insurance Portal account';
+  const intro = `An account has been created for you on the University of Toledo Athletics `
+    + `Insurance Portal as ${roleLabel}. Sign in with the details below.`;
+  const closing = 'You will be asked to choose your own password the first time you sign in. '
+    + 'The temporary password stops working at that point.';
+  const cell = 'padding:6px 12px;border:1px solid #e9ecef';
+  const label = 'padding:6px 12px;background:#f8f9fa;font-weight:600;width:40%';
+  await sendEmail(
+    env, to, subject,
+    emailHtml(
+      env, subject,
+      `<p>Hi ${escapeHtml(name)},</p><p>${escapeHtml(intro)}</p>`
+      + `<table style="border-collapse:collapse;width:100%;margin:12px 0">`
+      + `<tr><td style="${label}">Email</td><td style="${cell}">${escapeHtml(to)}</td></tr>`
+      + `<tr><td style="${label}">Temporary password</td>`
+      + `<td style="${cell}"><code style="font-size:15px">${escapeHtml(tempPassword)}</code></td></tr>`
+      + `</table>`
+      + `<p style="color:#666;font-size:14px">${escapeHtml(closing)}</p>`,
+      link, 'Sign in',
+    ),
+    emailText(env, subject, [
+      `Hi ${name},`, '', intro, '',
+      `Email: ${to}`,
+      `Temporary password: ${tempPassword}`,
+      '', closing,
+    ], link),
+    { template: 'notifyAccountCreated' },
+  );
+}
+
 /** Tells a self-registered user their account request was approved or rejected. */
 export async function notifyRegistrationDecision(
   env: Env, to: string, name: string, approved: boolean,

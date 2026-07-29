@@ -1662,13 +1662,32 @@ h2 {
   min-height: 44px;
 }
 
+/* Hover stays deliberately faint. It previously used a light blue border, which was
+   near-identical to the selected border and made "is this on?" unanswerable. */
 .checkbox-chip:hover {
   border-color: #aac4e8;
+  background: #fafbfd;
 }
 
+/* Selected carries four cues at once — border, fill, inner ring, and text weight.
+   A single 4% background tint renders around #f7f9fc, indistinguishable from white. */
 .checkbox-chip--checked {
   border-color: var(--blue);
-  background: rgba(0, 61, 165, .04);
+  background: rgba(0, 61, 165, .10);
+  box-shadow: inset 0 0 0 1px var(--blue);
+  color: var(--blue);
+  font-weight: 600;
+}
+
+.checkbox-chip--checked:hover {
+  background: rgba(0, 61, 165, .15);
+}
+
+/* The chip is a <label> wrapping the input, so the input's own focus ring is easy to
+   miss. Lift it to the chip for keyboard users. */
+.checkbox-chip:focus-within {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
 }
 
 .checkbox-chip input[type="checkbox"] {

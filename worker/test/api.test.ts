@@ -216,6 +216,133 @@ describe('user deletion privileges', () => {
   });
 });
 
+describe('administrator accounts are visible to the Sports page', () => {
+  // sports_programs.sport_admin_id references sport_administrators, but accounts created
+  // through the Users page only ever landed in users. The picker reads the former, so a
+  // newly created Sport Administrator could not be assigned to any sport.
+  it('mirrors a created sport_admin into sport_administrators and lists it', async () => {
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+
+    const res = await call('/api/admin/users', {
+      method: 'POST', cookie: boss.cookie,
+      body: JSON.stringify({
+        email: 'newadmin@example.edu', password: 'temp-password-1', name: 'New Admin',
+        role: 'sport_admin', sportIds: ['womens_golf'],
+      }),
+    });
+    expect(res.status).toBe(201);
+    const created = await res.json<{ id: string }>();
+
+    const mirrored = await env.DB.prepare(
+      'SELECT id, email, is_cfo FROM sport_administrators WHERE id = ?'
+    ).bind(created.id).first<{ id: string; email: string; is_cfo: number }>();
+    expect(mirrored).toBeTruthy();
+    expect(mirrored!.email).toBe('newadmin@example.edu');
+    expect(mirrored!.is_cfo).toBe(0);
+
+    const list = await (await call('/api/admin/sport-admins', { cookie: boss.cookie }))
+      .json<{ id: string; name: string }[]>();
+    expect(list.map(a => a.id)).toContain(created.id);
+    // The originally seeded administrators are not displaced by the mirroring.
+    expect(list.map(a => a.id)).toContain('brian_lutz');
+  });
+
+  it('flags a created cfo so its sports finalize on one signature', async () => {
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+
+    const res = await call('/api/admin/users', {
+      method: 'POST', cookie: boss.cookie,
+      body: JSON.stringify({
+        email: 'newcfo@example.edu', password: 'temp-password-1', name: 'New CFO', role: 'cfo',
+      }),
+    });
+    const created = await res.json<{ id: string }>();
+
+    const mirrored = await env.DB.prepare('SELECT is_cfo FROM sport_administrators WHERE id = ?')
+      .bind(created.id).first<{ is_cfo: number }>();
+    expect(mirrored!.is_cfo).toBe(1);
+  });
+
+  it('emails the temporary password to the new account', async () => {
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+
+    await call('/api/admin/users', {
+      method: 'POST', cookie: boss.cookie,
+      body: JSON.stringify({
+        email: 'newadmin@example.edu', password: 'temp-password-1', name: 'New Admin',
+        role: 'sport_admin', sportIds: ['womens_golf'],
+      }),
+    });
+
+    const logged = await env.DB.prepare(
+      'SELECT to_email, template FROM email_log WHERE template = ?'
+    ).bind('notifyAccountCreated').first<{ to_email: string; template: string }>();
+    expect(logged).toBeTruthy();
+    expect(logged!.to_email).toBe('newadmin@example.edu');
+  });
+
+  it('detaches sports and removes the mirror when the account is deleted', async () => {
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    const created = await (await call('/api/admin/users', {
+      method: 'POST', cookie: boss.cookie,
+      body: JSON.stringify({
+        email: 'newadmin@example.edu', password: 'temp-password-1', name: 'New Admin',
+        role: 'sport_admin', sportIds: ['womens_golf'],
+      }),
+    })).json<{ id: string }>();
+
+    await env.DB.prepare('UPDATE sports_programs SET sport_admin_id = ? WHERE id = ?')
+      .bind(created.id, 'womens_golf').run();
+
+    expect((await call(`/api/admin/users/${created.id}`, { method: 'DELETE', cookie: boss.cookie })).status).toBe(200);
+
+    expect(await env.DB.prepare('SELECT id FROM sport_administrators WHERE id = ?')
+      .bind(created.id).first()).toBeNull();
+    // Left dangling, the Sports page renders a blank administrator for this sport.
+    const sport = await env.DB.prepare('SELECT sport_admin_id FROM sports_programs WHERE id = ?')
+      .bind('womens_golf').first<{ sport_admin_id: string | null }>();
+    expect(sport!.sport_admin_id).toBeNull();
+  });
+
+  it('does not duplicate a seeded administrator who is later given a login', async () => {
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+
+    const res = await call('/api/admin/users', {
+      method: 'POST', cookie: boss.cookie,
+      body: JSON.stringify({
+        email: 'brian.lutz@utoledo.edu', password: 'temp-password-1', name: 'Brian Lutz',
+        role: 'sport_admin', sportIds: ['womens_golf'],
+      }),
+    });
+    expect(res.status).toBe(201);
+
+    const rows = await env.DB.prepare(
+      'SELECT id FROM sport_administrators WHERE lower(email) = ?'
+    ).bind('brian.lutz@utoledo.edu').all<{ id: string }>();
+    // Two entries for one person would make the Sports picker ambiguous.
+    expect(rows.results.length).toBe(1);
+    expect(rows.results[0].id).toBe('brian_lutz');
+  });
+
+  it('hides a mirrored administrator once the account is deactivated', async () => {
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    const created = await (await call('/api/admin/users', {
+      method: 'POST', cookie: boss.cookie,
+      body: JSON.stringify({
+        email: 'newadmin@example.edu', password: 'temp-password-1', name: 'New Admin',
+        role: 'sport_admin', sportIds: ['womens_golf'],
+      }),
+    })).json<{ id: string }>();
+
+    await env.DB.prepare('UPDATE users SET status = ? WHERE id = ?').bind('rejected', created.id).run();
+
+    const list = await (await call('/api/admin/sport-admins', { cookie: boss.cookie }))
+      .json<{ id: string }[]>();
+    expect(list.map(a => a.id)).not.toContain(created.id);
+    expect(list.map(a => a.id)).toContain('brian_lutz');
+  });
+});
+
 describe('request deletion leaves a tombstone', () => {
   it('records what was destroyed after the audit rows go with it', async () => {
     const superAdmin = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
