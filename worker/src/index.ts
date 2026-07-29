@@ -108,6 +108,9 @@ app.use('/auth/register', rateLimit(5, 60));
 
 type AuthedContext = { req: { raw: Request }; env: Env };
 
+/** A verified session plus the account state the token cannot be trusted to carry. */
+type SessionUser = JWTPayload & { mustChangePassword: number };
+
 /**
  * Resolve the caller from the auth cookie, then re-validate against the database.
  *
@@ -121,16 +124,17 @@ type AuthedContext = { req: { raw: Request }; env: Env };
  * Anonymous Coach sessions (issued by POST /auth/select) have no user row and are
  * returned as-is.
  */
-async function currentUser(c: AuthedContext): Promise<JWTPayload | null> {
+async function currentUser(c: AuthedContext): Promise<SessionUser | null> {
   const payload = await getUser(c.req.raw, c.env.JWT_SECRET);
   if (!payload) return null;
-  if (payload.sub.startsWith(ANON_COACH_PREFIX)) return payload;
+  if (payload.sub.startsWith(ANON_COACH_PREFIX)) return { ...payload, mustChangePassword: 0 };
 
   const row = await c.env.DB.prepare(
-    'SELECT email, name, role, sport_id, status, token_version FROM users WHERE id = ?'
+    'SELECT email, name, role, sport_id, status, token_version, must_change_password FROM users WHERE id = ?'
   ).bind(payload.sub).first<{
     email: string; name: string; role: string;
     sport_id: string | null; status: string | null; token_version: number | null;
+    must_change_password: number | null;
   }>();
 
   if (!row) return null;                                              // account deleted
@@ -143,8 +147,30 @@ async function currentUser(c: AuthedContext): Promise<JWTPayload | null> {
     name: row.name,
     role: row.role as JWTPayload['role'],
     sportId: row.sport_id ?? undefined,
+    mustChangePassword: row.must_change_password ?? 0,
   };
 }
+
+/**
+ * Block everything except changing the password while a temporary one is still in place.
+ *
+ * The SPA redirects to /change-password, but a redirect only constrains the SPA. An
+ * account created by an administrator gets a fully privileged session cookie at login,
+ * and the administrator knows that temporary password, so without a server-side check
+ * either party can drive the API directly and never replace it. The allowed routes are
+ * the ones needed to see who you are, change the password, and sign out.
+ */
+// Scoped to /api/* deliberately. Static assets and the SPA shell must keep loading so
+// the user can reach the change-password screen, and nothing under /auth/* is exploitable
+// with a temporary password: /auth/me, /auth/password, and /auth/logout are exactly what
+// the flow needs, and the rest are public endpoints that ignore the caller's session.
+app.use('/api/*', async (c, next) => {
+  const user = await currentUser(c);
+  if (user?.mustChangePassword) {
+    return err('You must set a new password before using the portal.', 403);
+  }
+  return next();
+});
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -260,6 +286,28 @@ async function isSingleApproval(env: Env, sportId: string): Promise<boolean> {
   const row = await env.DB.prepare('SELECT single_approval FROM sports_programs WHERE id = ?')
     .bind(sportId).first<{ single_approval: number | null }>();
   return !!row?.single_approval;
+}
+
+/**
+ * Recompute a sport's single_approval flag from its current administrator.
+ *
+ * The flag means "this sport's administrator is the CFO, so one CFO signature is the
+ * whole approval". Backfilling it once in the migration is not enough, because the
+ * Sports admin UI can create a sport or reassign sport_admin_id afterwards. Left
+ * unmaintained it drifts both ways: assigning the CFO to another sport would leave the
+ * flag at 0 and stall the workflow waiting for a second signature from the same person,
+ * and moving softball to a different administrator would leave it at 1 and let the CFO
+ * execute alone. Called from both write paths, mirroring syncHeadCoachColumns.
+ */
+async function syncSingleApproval(env: Env, sportId: string): Promise<void> {
+  await env.DB.prepare(`
+    UPDATE sports_programs
+    SET single_approval = CASE
+      WHEN sport_admin_id IS NOT NULL
+       AND sport_admin_id IN (SELECT id FROM sport_administrators WHERE is_cfo = 1)
+      THEN 1 ELSE 0 END
+    WHERE id = ?
+  `).bind(sportId).run();
 }
 
 const clientIp = (c: { req: { header: (k: string) => string | undefined } }) =>
@@ -1968,6 +2016,7 @@ app.post('/api/admin/sports', async c => {
   await c.env.DB.prepare(
     'INSERT INTO sports_programs (id, name, gender, head_coach, head_coach_email, sport_admin_id) VALUES (?, ?, ?, ?, ?, ?)'
   ).bind(id, name.trim(), gender.trim(), headCoach?.trim() || null, email, sportAdminId || null).run();
+  await syncSingleApproval(c.env, id);
 
   return json({ id, name: name.trim(), gender: gender.trim(), headCoach: headCoach?.trim() || null, headCoachEmail: email, sportAdminId: sportAdminId || null }, 201);
 });
@@ -2005,6 +2054,9 @@ app.put('/api/admin/sports/:id', async c => {
     sportAdminId || null,
     id,
   ).run();
+  // The administrator may have changed, which changes whether one CFO signature is the
+  // whole approval for this sport.
+  await syncSingleApproval(c.env, id);
 
   return json({ ok: true });
 });
@@ -2479,14 +2531,29 @@ async function runReminders(env: Env): Promise<void> {
  * the same athlete and term. This closes that loop.
  */
 async function runExpiry(env: Env): Promise<void> {
+  // Work out which terms are past their deadline first, then select only requests in
+  // those terms. Taking the oldest N pending rows and filtering them afterwards would
+  // starve: if the N oldest are all for future terms, a newer expired request is never
+  // reached on any run, so it stays pending forever and keeps blocking resubmission.
+  // Whether a term is expired depends on parsing the term string, which SQL cannot do,
+  // but the set of distinct pending terms is tiny.
+  const { results: terms } = await env.DB.prepare(`
+    SELECT DISTINCT term FROM insurance_requests
+    WHERE status IN ('PENDING_COACH', 'PENDING_APPROVAL')
+  `).all<{ term: string }>();
+
+  const expiredTerms = terms.map(t => t.term).filter(term => !isBeforeDeadline(term));
+  if (expiredTerms.length === 0) return;
+
   const { results } = await env.DB.prepare(`
     SELECT id, term FROM insurance_requests
     WHERE status IN ('PENDING_COACH', 'PENDING_APPROVAL')
+      AND term IN (${expiredTerms.map(() => '?').join(',')})
     ORDER BY created_at ASC
     LIMIT ?
-  `).bind(EXPIRY_BATCH).all<{ id: string; term: string }>();
+  `).bind(...expiredTerms, EXPIRY_BATCH).all<{ id: string; term: string }>();
 
-  const expired = results.filter(r => !isBeforeDeadline(r.term));
+  const expired = results;
   if (expired.length === 0) return;
 
   const mailEnv = await getConfiguredEnv(env);

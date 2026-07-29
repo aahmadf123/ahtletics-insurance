@@ -435,7 +435,141 @@ describe('filtered list queries', () => {
   });
 });
 
+describe('temporary password gating', () => {
+  // The SPA redirects to /change-password, but a redirect only constrains the SPA. The
+  // administrator who typed the temporary password knows it, so the API had to enforce
+  // this too or either party could keep using the account without replacing it.
+  it('refuses API calls until the password is replaced', async () => {
+    const user = await seedUser({
+      email: 'newhire@example.edu', role: 'cfo', password: 'temp-password-1', mustChangePassword: 1,
+    });
+    const res = await call('/api/requests', { cookie: user.cookie });
+    expect(res.status).toBe(403);
+    expect((await res.json<{ error: string }>()).error).toMatch(/set a new password/i);
+  });
+
+  it('still allows the routes the change flow needs', async () => {
+    const user = await seedUser({
+      email: 'newhire@example.edu', role: 'cfo', password: 'temp-password-1', mustChangePassword: 1,
+    });
+    expect((await call('/auth/me', { cookie: user.cookie })).status).toBe(200);
+    expect((await call('/auth/logout', { method: 'POST', cookie: user.cookie })).status).toBe(200);
+  });
+
+  it('reports the flag on /auth/me so the SPA can redirect', async () => {
+    const user = await seedUser({
+      email: 'newhire@example.edu', role: 'cfo', password: 'temp-password-1', mustChangePassword: 1,
+    });
+    const body = await (await call('/auth/me', { cookie: user.cookie })).json<{ mustChangePassword: number }>();
+    expect(body.mustChangePassword).toBe(1);
+  });
+
+  it('lets the account through once the password is changed', async () => {
+    const user = await seedUser({
+      email: 'newhire@example.edu', role: 'cfo', password: 'temp-password-1', mustChangePassword: 1,
+    });
+    const changed = await call('/auth/password', {
+      method: 'PUT',
+      cookie: user.cookie,
+      body: JSON.stringify({ currentPassword: 'temp-password-1', newPassword: 'chosen-password-1' }),
+    });
+    expect(changed.status).toBe(200);
+
+    // The change re-issues the cookie at the new token version; use it.
+    const refreshed = changed.headers.get('Set-Cookie')!.split(';')[0];
+    expect((await call('/api/requests', { cookie: refreshed })).status).toBe(200);
+  });
+
+  it('does not gate an account that never had a temporary password', async () => {
+    const user = await seedUser({ email: 'normal@example.edu', role: 'cfo' });
+    expect((await call('/api/requests', { cookie: user.cookie })).status).toBe(200);
+  });
+});
+
+describe('single_approval stays in step with the administrator', () => {
+  // Backfilling the flag once in the migration is not enough: the Sports admin UI can
+  // create a sport or reassign its administrator afterwards, and the flag drifts both ways.
+  it('sets the flag when a new sport is created under the CFO', async () => {
+    const superAdmin = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    const res = await call('/api/admin/sports', {
+      method: 'POST',
+      cookie: superAdmin.cookie,
+      body: JSON.stringify({ name: 'Beach Volleyball', gender: 'Womens', sportAdminId: 'melissa_deangelo' }),
+    });
+    expect(res.status).toBe(201);
+    const { id } = await res.json<{ id: string }>();
+
+    const row = await env.DB.prepare('SELECT single_approval FROM sports_programs WHERE id = ?')
+      .bind(id).first<{ single_approval: number }>();
+    expect(row?.single_approval).toBe(1);
+  });
+
+  it('leaves the flag clear for a sport under a non-CFO administrator', async () => {
+    const superAdmin = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    const res = await call('/api/admin/sports', {
+      method: 'POST',
+      cookie: superAdmin.cookie,
+      body: JSON.stringify({ name: 'Wrestling', gender: 'Mens', sportAdminId: 'brian_lutz' }),
+    });
+    const { id } = await res.json<{ id: string }>();
+
+    const row = await env.DB.prepare('SELECT single_approval FROM sports_programs WHERE id = ?')
+      .bind(id).first<{ single_approval: number }>();
+    expect(row?.single_approval).toBe(0);
+  });
+
+  it('clears the flag when softball is moved off the CFO', async () => {
+    const superAdmin = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    await call('/api/admin/sports/womens_softball', {
+      method: 'PUT',
+      cookie: superAdmin.cookie,
+      body: JSON.stringify({ sportAdminId: 'brian_lutz' }),
+    });
+
+    // Otherwise the CFO could still execute alone on a sport they no longer administer.
+    const row = await env.DB.prepare("SELECT single_approval FROM sports_programs WHERE id = 'womens_softball'")
+      .first<{ single_approval: number }>();
+    expect(row?.single_approval).toBe(0);
+  });
+
+  it('sets the flag when an existing sport is moved onto the CFO', async () => {
+    const superAdmin = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    await call('/api/admin/sports/womens_soccer', {
+      method: 'PUT',
+      cookie: superAdmin.cookie,
+      body: JSON.stringify({ sportAdminId: 'melissa_deangelo' }),
+    });
+
+    // Otherwise the workflow waits for a second signature from the same person.
+    const row = await env.DB.prepare("SELECT single_approval FROM sports_programs WHERE id = 'womens_soccer'")
+      .first<{ single_approval: number }>();
+    expect(row?.single_approval).toBe(1);
+  });
+});
+
 describe('expiry sweep', () => {
+  it('reaches an expired request behind a batch of unexpired ones', async () => {
+    // Selecting the oldest N pending rows and filtering afterwards starves: if the N
+    // oldest are all for future terms, a newer expired request is never reached on any
+    // run and stays pending forever, still blocking resubmission.
+    for (let i = 0; i < 120; i++) {
+      await seedRequest({
+        term: 'Fall 2099', status: 'PENDING_APPROVAL',
+        rocketNumber: `R${String(i).padStart(8, '0')}`, createdAt: '2020-01-01 00:00:00',
+      });
+    }
+    const buried = await seedRequest({
+      term: 'Fall 2000', status: 'PENDING_COACH', rocketNumber: 'R99999999',
+      createdAt: '2026-01-01 00:00:00',
+    });
+
+    await runScheduled();
+
+    const row = await env.DB.prepare('SELECT status FROM insurance_requests WHERE id = ?')
+      .bind(buried).first<{ status: string }>();
+    expect(row?.status).toBe('EXPIRED');
+  });
+
   it('retires a pending request whose deadline has passed and frees the duplicate guard', async () => {
     const stale = await seedRequest({
       sport: 'womens_soccer', term: 'Fall 2000', status: 'PENDING_COACH', rocketNumber: 'R90000001',
