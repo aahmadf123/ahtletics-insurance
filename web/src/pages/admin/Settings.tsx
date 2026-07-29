@@ -12,6 +12,7 @@ export function AdminSettingsPage() {
   const [fromName, setFromName] = useState('');
   const [fromEmail, setFromEmail] = useState('');
   const [appBaseUrl, setAppBaseUrl] = useState('');
+  const [replyTo, setReplyTo] = useState('');
 
   useEffect(() => {
     getAdminSettings()
@@ -19,6 +20,7 @@ export function AdminSettingsPage() {
         setFromName(s.fromName);
         setFromEmail(s.fromEmail);
         setAppBaseUrl(s.appBaseUrl);
+        setReplyTo(s.replyTo ?? '');
       })
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
@@ -38,10 +40,12 @@ export function AdminSettingsPage() {
         fromName: fromName.trim(),
         fromEmail: fromEmail.trim().toLowerCase(),
         appBaseUrl: appBaseUrl.trim().replace(/\/$/, ''),
+        replyTo: replyTo.trim().toLowerCase(),
       });
       setFromName(saved.fromName);
       setFromEmail(saved.fromEmail);
       setAppBaseUrl(saved.appBaseUrl);
+      setReplyTo(saved.replyTo ?? '');
       setSuccess('Settings saved. New values are now used for outgoing email and portal links.');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to save settings');
@@ -85,7 +89,26 @@ export function AdminSettingsPage() {
               placeholder="noreply@mail.utrockets-insurance.com"
               required
             />
-            <p className="field-hint">Must be a domain/address allowed by your email provider (Resend).</p>
+            <p className="field-hint">
+              Must be an address on a domain verified with your email provider (Resend).
+              Use the dedicated sending subdomain, not the apex, so a reputation problem
+              stays contained.
+            </p>
+          </div>
+
+          <div className="field">
+            <label>Reply-To Address</label>
+            <input
+              type="email"
+              value={replyTo}
+              onChange={e => setReplyTo(e.target.value)}
+              placeholder="athletics-insurance@send.utrockets-insurance.com"
+            />
+            <p className="field-hint">
+              A monitored mailbox. Mail with no working reply path is scored more harshly
+              by university spam filtering, and recipients who reply to a notification
+              should reach a person. Leave blank to send without a Reply-To header.
+            </p>
           </div>
 
           <div className="field">

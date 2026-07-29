@@ -1,10 +1,93 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../../lib/auth';
-import { getRequest, voidRequest, signRequest, getRequestPdfUrl, deleteRequest, denyRequest } from '../../lib/api';
+import {
+  getRequest, voidRequest, signRequest, getRequestPdfUrl, getRequestCalendarUrl,
+  deleteRequest, denyRequest, listRequestEmails, type EmailLogEntry,
+} from '../../lib/api';
 import { StatusBadge } from '../../components/StatusBadge';
 import { fundingSourceLabel } from '../../types';
 import type { RequestDetail } from '../../types';
+
+/**
+ * Shows what the portal tried to send about this request and what came back.
+ *
+ * University mail filtering silently quarantines these notifications, so an approval
+ * stalling is usually a delivery question, not a workflow question. The copy-link button
+ * makes the existing manual workaround (paste the link into a message the recipient will
+ * actually see) a supported action rather than something done by hand.
+ */
+function DeliveryLog({ requestId }: { requestId: string }) {
+  const [entries, setEntries] = useState<EmailLogEntry[] | null>(null);
+  const [error, setError] = useState('');
+  const [copied, setCopied] = useState(false);
+  const link = `${window.location.origin}/request/${requestId}`;
+
+  useEffect(() => {
+    listRequestEmails(requestId)
+      .then(setEntries)
+      .catch(err => setError(err.message));
+  }, [requestId]);
+
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    } catch {
+      setError('Could not copy automatically. Select the address above and copy it manually.');
+    }
+  };
+
+  return (
+    <div className="form-card">
+      <h2>Notification Delivery</h2>
+      <p className="muted" style={{ marginTop: 0 }}>
+        University mail filtering can hold these messages without bouncing them. A status
+        of Sent means the provider accepted it, not that it reached an inbox. If an
+        approver says they never received it, send them the link directly.
+      </p>
+
+      <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap', margin: '12px 0' }}>
+        <code style={{ wordBreak: 'break-all', fontSize: '0.85rem' }}>{link}</code>
+        <button className="btn btn-secondary" onClick={copyLink}>
+          {copied ? 'Copied' : 'Copy link'}
+        </button>
+      </div>
+
+      {error && <p className="error">{error}</p>}
+
+      {entries === null ? (
+        <p className="muted">Loading delivery history…</p>
+      ) : entries.length === 0 ? (
+        <p className="muted">No notifications have been sent for this request yet.</p>
+      ) : (
+        <div className="table-wrapper">
+          <table className="data-table">
+            <thead>
+              <tr><th>Sent</th><th>Recipient</th><th>Subject</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+              {entries.map(e => (
+                <tr key={e.id}>
+                  <td>{new Date(e.createdAt).toLocaleString()}</td>
+                  <td>{e.toEmail}</td>
+                  <td>{e.subject}</td>
+                  <td>
+                    <span className={`badge ${e.status === 'sent' ? 'badge--executed' : 'badge--voided'}`}>
+                      {e.status}
+                    </span>
+                    {e.error && <div className="field-error">{e.error}</div>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function RequestDetail() {
   const { id } = useParams<{ id: string }>();
@@ -24,6 +107,7 @@ export function RequestDetail() {
   const [showConfirmDelete, setShowConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState('');
+  const [signedMessage, setSignedMessage] = useState('');
   const [coachNameInput, setCoachNameInput] = useState('');
 
   const loadRequest = () => {
@@ -52,8 +136,12 @@ export function RequestDetail() {
     try {
       await signRequest(id, user?.role === 'coach' ? coachNameInput.trim() : undefined);
       setShowConfirmSign(false);
-      // Signature recorded — return to the dashboard (mirrors void/delete).
-      navigate('/dashboard');
+      setSigning(false);
+      // Stay here and reload rather than bouncing to the dashboard. The signer needs to
+      // see that the signature landed, what the status is now, and, once every approval
+      // is in, the completed authorization form.
+      setSignedMessage('Your signature has been recorded.');
+      loadRequest();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Signing failed');
       setSigning(false);
@@ -140,7 +228,16 @@ export function RequestDetail() {
         <StatusBadge status={req.status} sportAdminSigned={req.sportAdminSigned} cfoSigned={req.cfoSigned} />
       </div>
 
-      <h1>Insurance Request — {req.studentName}</h1>
+      <h1>Insurance Request: {req.studentName}</h1>
+
+      {signedMessage && (
+        <p className="success" style={{ color: '#16a34a', fontWeight: 600 }}>
+          {signedMessage}{' '}
+          {req.status === 'EXECUTED'
+            ? 'All approvals are in and the request is executed.'
+            : 'It now moves to the next approver.'}
+        </p>
+      )}
 
       {req.status === 'DENIED' && (
         <div className="action-zone action-zone--danger" style={{ marginTop: 0, marginBottom: '1rem' }}>
@@ -231,6 +328,26 @@ export function RequestDetail() {
           </div>
         </div>
       )}
+
+      {isPending && (
+        <div className="form-card">
+          <h2>Deadline Reminder</h2>
+          <p className="muted" style={{ marginTop: 0 }}>
+            Add the submission deadline for this request to your calendar. This used to be
+            attached to the approval email, but calendar attachments from an unfamiliar
+            sender are frequently held by university mail filtering.
+          </p>
+          <a
+            className="btn btn-secondary"
+            href={getRequestCalendarUrl(req.id)}
+            style={{ display: 'inline-block', textDecoration: 'none' }}
+          >
+            Add deadline to calendar
+          </a>
+        </div>
+      )}
+
+      {(user?.role === 'cfo' || user?.role === 'super_admin') && <DeliveryLog requestId={req.id} />}
 
       {showPdfPreview && (
         <div style={{

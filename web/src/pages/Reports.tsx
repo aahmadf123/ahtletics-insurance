@@ -9,6 +9,9 @@ const ALL_STATUSES: RequestStatus[] = [
   'PENDING_COACH', 'PENDING_APPROVAL', 'EXECUTED', 'DENIED', 'VOIDED', 'EXPIRED',
 ];
 
+/** Mirrors REPORT_ROW_CAP in the Worker. */
+const REPORT_ROW_CAP = 5000;
+
 export function Reports() {
   const { user } = useAuth();
   const [rows, setRows] = useState<ReportRow[]>([]);
@@ -114,10 +117,22 @@ export function Reports() {
 
   const hasFilters = !!(filterSport || filterTerm || filterStatus || filterCoach);
 
+  // The API bounds the on-screen report so a large season cannot render as one table.
+  // Say so plainly when the bound is hit, rather than presenting a partial total as if
+  // it were the whole picture.
+  const truncated = allRows.length >= REPORT_ROW_CAP || rows.length >= REPORT_ROW_CAP;
+
   return (
     <div className="page">
+      {truncated && (
+        <p className="error">
+          This view is limited to {REPORT_ROW_CAP.toLocaleString()} requests and there are
+          more than that. The totals below cover only the requests shown. Narrow the
+          filters, or use the CSV export, which includes everything.
+        </p>
+      )}
       <div className="page-header">
-        <h1>Financial Reports & Dashboard</h1>
+        <h1>Financial Reports and Dashboard</h1>
         <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
           <button
             type="button"

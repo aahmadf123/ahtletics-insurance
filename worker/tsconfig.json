@@ -9,7 +9,10 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "skipLibCheck": true,
-    "outDir": "dist"
+    // Wrangler bundles the Worker; tsc is only used for type checking here. Without
+    // noEmit, the shared/ include above pushes the inferred rootDir above this package
+    // and tsc complains about files outside it.
+    "noEmit": true
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "../shared/**/*.ts"]
 }

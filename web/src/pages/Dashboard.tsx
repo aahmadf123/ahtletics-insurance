@@ -3,13 +3,21 @@ import { Link } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 import { listRequests, listSports, bulkSignRequests, bulkDenyRequests, bulkVoidRequests, bulkDeleteRequests } from '../lib/api';
 import { StatusBadge } from '../components/StatusBadge';
+import { ReasonModal } from '../components/ReasonModal';
+import { TERMS } from '../types';
 import type { InsuranceRequest, SportProgram, RequestStatus } from '../types';
 
 const ALL_STATUSES: RequestStatus[] = [
   'PENDING_COACH', 'PENDING_APPROVAL', 'EXECUTED', 'DENIED', 'VOIDED', 'EXPIRED',
 ];
 
-const TERM_LABELS = ['Fall', 'Spring/Summer', 'Summer', 'Full Year'];
+const TERM_LABELS = TERMS.map(t => t.key);
+
+const PAGE_SIZE = 50;
+
+// Only terminal records can be bulk deleted. Deleting a live request destroys its audit
+// rows mid-workflow; voiding is the correct way to stop one that is still in flight.
+const DELETABLE_STATUSES: RequestStatus[] = ['EXECUTED', 'VOIDED', 'DENIED', 'EXPIRED'];
 
 export function Dashboard() {
   const { user } = useAuth();
@@ -21,6 +29,13 @@ export function Dashboard() {
 
   const [showBulkSignModal, setShowBulkSignModal] = useState(false);
   const [coachNameInput, setCoachNameInput] = useState('');
+
+  // Which confirmation modal is open, replacing window.prompt / window.confirm.
+  const [prompt, setPrompt] = useState<'deny' | 'void' | 'delete' | null>(null);
+  const [modalError, setModalError] = useState('');
+  const [deleteConfirm, setDeleteConfirm] = useState('');
+
+  const [page, setPage] = useState(0);
 
   // Filters
   const [filterSport, setFilterSport] = useState('');
@@ -37,8 +52,15 @@ export function Dashboard() {
     listSports().then(setSports).catch(console.error);
   }, []);
 
+  // Ask for one row beyond the page so we know whether a next page exists without a
+  // separate count query.
+  const [hasMore, setHasMore] = useState(false);
+
   const fetchRequests = useCallback(() => {
-    const params: Record<string, string> = {};
+    const params: Record<string, string> = {
+      limit: String(PAGE_SIZE + 1),
+      offset: String(page * PAGE_SIZE),
+    };
     if (filterSport) params.sport = filterSport;
     if (filterStatus) params.status = filterStatus;
     if (filterTerm) params.term = filterTerm;
@@ -46,14 +68,30 @@ export function Dashboard() {
 
     setLoading(true);
     listRequests(params)
-      .then(setRequests)
+      .then(rows => {
+        setHasMore(rows.length > PAGE_SIZE);
+        setRequests(rows.slice(0, PAGE_SIZE));
+      })
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
-  }, [filterSport, filterStatus, filterTerm, filterCoach]);
+  }, [filterSport, filterStatus, filterTerm, filterCoach, page]);
 
   useEffect(() => {
     fetchRequests();
   }, [fetchRequests]);
+
+  // A filter change makes the current offset meaningless.
+  useEffect(() => {
+    setPage(0);
+    setSelectedIds(new Set());
+  }, [filterSport, filterStatus, filterTerm, filterCoach]);
+
+  // Clear the success banner on a timer, cancelling it if the component unmounts first.
+  useEffect(() => {
+    if (!successMsg) return;
+    const t = setTimeout(() => setSuccessMsg(''), 5000);
+    return () => clearTimeout(t);
+  }, [successMsg]);
 
   // Determine which filters to show
   const showSportFilter = user?.role === 'coach' || user?.role === 'cfo' || user?.role === 'super_admin';
@@ -88,7 +126,10 @@ export function Dashboard() {
   const isVoidable = (r: InsuranceRequest): boolean =>
     !!canBulkVoid && (r.status === 'PENDING_COACH' || r.status === 'PENDING_APPROVAL');
 
-  const isDeletable = (r: InsuranceRequest): boolean => !!canBulkDelete;
+  // Previously returned true for every row, so "select all" swept up live requests and
+  // one confirm dialog erased them along with their audit trail.
+  const isDeletable = (r: InsuranceRequest): boolean =>
+    !!canBulkDelete && DELETABLE_STATUSES.includes(r.status);
 
   const isRowSelectable = (r: InsuranceRequest): boolean => {
     return isApprovable(r) || isDeniable(r) || isVoidable(r) || isDeletable(r);
@@ -132,8 +173,7 @@ export function Dashboard() {
       const result = await bulkSignRequests([...selectedIds], user?.role === 'coach' ? coachNameInput.trim() : undefined);
       setSelectedIds(new Set());
       setShowBulkSignModal(false);
-      setSuccessMsg(`Successfully approved ${result.signed} request${result.signed !== 1 ? 's' : ''}.`);
-      setTimeout(() => setSuccessMsg(''), 5000);
+      setSuccessMsg(`Approved ${result.signed} request${result.signed !== 1 ? 's' : ''}.`);
       fetchRequests();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Bulk sign failed');
@@ -148,39 +188,35 @@ export function Dashboard() {
   const selectedVoidableIds = selectedRequests.filter(isVoidable).map(r => r.id);
   const selectedDeletableIds = selectedRequests.filter(isDeletable).map(r => r.id);
 
-  const handleBulkDeny = async () => {
+  const handleBulkDeny = async (reason: string) => {
     if (selectedDeniableIds.length === 0) return;
-    const reason = window.prompt('Enter decline reason for selected requests:')?.trim();
-    if (!reason) return;
     setBulkActing(true);
-    setError('');
+    setModalError('');
     try {
       const result = await bulkDenyRequests(selectedDeniableIds, reason);
       setSelectedIds(new Set());
-      setSuccessMsg(`Successfully declined ${result.denied} request${result.denied !== 1 ? 's' : ''}.`);
-      setTimeout(() => setSuccessMsg(''), 5000);
+      setPrompt(null);
+      setSuccessMsg(`Declined ${result.denied} request${result.denied !== 1 ? 's' : ''}.`);
       fetchRequests();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Bulk decline failed');
+      setModalError(err instanceof Error ? err.message : 'Bulk decline failed');
     } finally {
       setBulkActing(false);
     }
   };
 
-  const handleBulkVoid = async () => {
+  const handleBulkVoid = async (reason: string) => {
     if (selectedVoidableIds.length === 0) return;
-    const reason = window.prompt('Enter void reason for selected requests:')?.trim();
-    if (!reason) return;
     setBulkActing(true);
-    setError('');
+    setModalError('');
     try {
       const result = await bulkVoidRequests(selectedVoidableIds, reason);
       setSelectedIds(new Set());
-      setSuccessMsg(`Successfully voided ${result.voided} request${result.voided !== 1 ? 's' : ''}.`);
-      setTimeout(() => setSuccessMsg(''), 5000);
+      setPrompt(null);
+      setSuccessMsg(`Voided ${result.voided} request${result.voided !== 1 ? 's' : ''}.`);
       fetchRequests();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Bulk void failed');
+      setModalError(err instanceof Error ? err.message : 'Bulk void failed');
     } finally {
       setBulkActing(false);
     }
@@ -188,17 +224,18 @@ export function Dashboard() {
 
   const handleBulkDelete = async () => {
     if (selectedDeletableIds.length === 0) return;
-    if (!window.confirm(`Delete ${selectedDeletableIds.length} selected request(s)? This cannot be undone.`)) return;
+    if (deleteConfirm.trim() !== String(selectedDeletableIds.length)) return;
     setBulkActing(true);
-    setError('');
+    setModalError('');
     try {
       const result = await bulkDeleteRequests(selectedDeletableIds);
       setSelectedIds(new Set());
-      setSuccessMsg(`Successfully deleted ${result.deleted} request${result.deleted !== 1 ? 's' : ''}.`);
-      setTimeout(() => setSuccessMsg(''), 5000);
+      setPrompt(null);
+      setDeleteConfirm('');
+      setSuccessMsg(`Deleted ${result.deleted} request${result.deleted !== 1 ? 's' : ''}.`);
       fetchRequests();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Bulk delete failed');
+      setModalError(err instanceof Error ? err.message : 'Bulk delete failed');
     } finally {
       setBulkActing(false);
     }
@@ -331,6 +368,94 @@ export function Dashboard() {
               ))}
             </tbody>
           </table>
+
+          <div className="pager">
+            <span className="muted">
+              Showing {page * PAGE_SIZE + 1} to {page * PAGE_SIZE + requests.length}
+              {hasMore ? '' : ` of ${page * PAGE_SIZE + requests.length}`}
+            </span>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                className="btn btn-secondary"
+                onClick={() => setPage(p => Math.max(0, p - 1))}
+                disabled={page === 0 || loading}
+              >
+                Previous
+              </button>
+              <button
+                className="btn btn-secondary"
+                onClick={() => setPage(p => p + 1)}
+                disabled={!hasMore || loading}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {prompt === 'deny' && (
+        <ReasonModal
+          title={`Decline ${selectedDeniableIds.length} request${selectedDeniableIds.length !== 1 ? 's' : ''}`}
+          intro="The coach is emailed this reason and can correct the issue and resubmit."
+          label="Reason for declining (required)"
+          confirmLabel="Confirm decline"
+          destructive
+          busy={bulkActing}
+          error={modalError}
+          onConfirm={handleBulkDeny}
+          onCancel={() => setPrompt(null)}
+        />
+      )}
+
+      {prompt === 'void' && (
+        <ReasonModal
+          title={`Void ${selectedVoidableIds.length} request${selectedVoidableIds.length !== 1 ? 's' : ''}`}
+          intro="Everyone named on the request is notified. Voiding is final; a voided request cannot be resubmitted."
+          label="Reason for voiding (required)"
+          confirmLabel="Confirm void"
+          destructive
+          busy={bulkActing}
+          error={modalError}
+          onConfirm={handleBulkVoid}
+          onCancel={() => setPrompt(null)}
+        />
+      )}
+
+      {prompt === 'delete' && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="bulk-delete-title">
+          <div className="form-card modal-card" style={{ maxWidth: '520px' }}>
+            <h2 id="bulk-delete-title">Permanently delete {selectedDeletableIds.length} request{selectedDeletableIds.length !== 1 ? 's' : ''}</h2>
+            <p className="muted" style={{ marginTop: 0 }}>
+              This erases the requests and their signatures. A record of the deletion stays
+              in the audit log, but the requests themselves cannot be recovered.
+            </p>
+            <div className="field">
+              <label htmlFor="bulk-delete-confirm">
+                Type <strong>{selectedDeletableIds.length}</strong> to confirm
+              </label>
+              <input
+                id="bulk-delete-confirm"
+                type="text"
+                value={deleteConfirm}
+                onChange={e => setDeleteConfirm(e.target.value)}
+                autoFocus
+              />
+            </div>
+            {modalError && <p className="error">{modalError}</p>}
+            <div style={{ display: 'flex', gap: '12px' }}>
+              <button
+                className="btn btn-danger"
+                onClick={handleBulkDelete}
+                disabled={bulkActing || deleteConfirm.trim() !== String(selectedDeletableIds.length)}
+              >
+                {bulkActing ? 'Deleting…' : 'Delete permanently'}
+              </button>
+              <button className="btn btn-secondary" onClick={() => setPrompt(null)} disabled={bulkActing}>
+                Cancel
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -357,31 +482,31 @@ export function Dashboard() {
             {selectedDeniableIds.length > 0 && (
               <button
                 className="btn btn-secondary"
-                onClick={handleBulkDeny}
+                onClick={() => { setModalError(''); setPrompt('deny'); }}
                 disabled={bulkSigning || bulkActing}
                 style={{ background: '#dc2626', color: '#fff', border: '1px solid #dc2626' }}
               >
-                {bulkActing ? 'Processing…' : `Bulk Decline (${selectedDeniableIds.length})`}
+                {`Bulk Decline (${selectedDeniableIds.length})`}
               </button>
             )}
             {selectedVoidableIds.length > 0 && (
               <button
                 className="btn btn-secondary"
-                onClick={handleBulkVoid}
+                onClick={() => { setModalError(''); setPrompt('void'); }}
                 disabled={bulkSigning || bulkActing}
                 style={{ background: '#6b7280', color: '#fff', border: '1px solid #6b7280' }}
               >
-                {bulkActing ? 'Processing…' : `Bulk Void (${selectedVoidableIds.length})`}
+                {`Bulk Void (${selectedVoidableIds.length})`}
               </button>
             )}
             {selectedDeletableIds.length > 0 && (
               <button
                 className="btn btn-secondary"
-                onClick={handleBulkDelete}
+                onClick={() => { setModalError(''); setDeleteConfirm(''); setPrompt('delete'); }}
                 disabled={bulkSigning || bulkActing}
                 style={{ background: '#111827', color: '#fff', border: '1px solid #111827' }}
               >
-                {bulkActing ? 'Processing…' : `Bulk Delete (${selectedDeletableIds.length})`}
+                {`Bulk Delete (${selectedDeletableIds.length})`}
               </button>
             )}
             <button

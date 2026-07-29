@@ -61,18 +61,50 @@ npx wrangler d1 migrations apply athletics-insurance-db --remote
 
 ## Deployment
 
-Single-origin deploy is unchanged (`cd worker && npx wrangler deploy`). After the custom
-domain `utrockets-insurance.com` is live in Cloudflare and a sending domain is verified in
-Resend, update `worker/wrangler.jsonc`:
+Single-origin deploy is unchanged (`cd worker && npx wrangler deploy`). `wrangler.jsonc`
+already points at the custom domain and the dedicated sending subdomain; the DNS records
+that make that sender deliverable are in `EMAIL_SETUP.md`.
 
-- `APP_BASE_URL` → `https://utrockets-insurance.com`
-- `FROM_EMAIL` → `noreply@mail.utrockets-insurance.com`
+Apply migrations before or with the deploy:
 
-then redeploy. The Worker CORS allow-list already includes the custom domain.
+```bash
+cd worker
+npx wrangler d1 migrations apply athletics-insurance-db --remote
+```
+
+## Hardening pass
+
+A later review found a set of defects across auth, authorization, notification delivery,
+and the request lifecycle. `migrations/0008_hardening.sql` and the changes alongside it
+cover:
+
+| Area | Change |
+|---|---|
+| Session validity | `currentUser()` re-reads the user row on every request; `users.token_version` in the JWT revokes sessions on password change, reset, and rejection |
+| Forced password change | `/change-password` is routed and gated, so admin-issued temporary passwords no longer last indefinitely |
+| Reset tokens | Stored as a SHA-256 digest, single live link per account, sessions revoked on use |
+| Login | Per-account failure counter and lockout window, backed by D1 rather than per-isolate memory |
+| PDF endpoint | Sport-admin scoping applied, and unsigned requests refused |
+| Deletion | Requests leave a tombstone audit row; users cannot be deleted by an equal or lower role |
+| Submission | Whole batch validated before any write, then committed with `DB.batch()` |
+| Query binding | Filters bound in one `bind(...params)` call; chained `.bind()` silently broke any query with two or more parameters |
+| Notifications | Plain-text parts, Reply-To, List-Unsubscribe, no urgency-prefixed subjects, no first-contact calendar attachment, visible link target |
+| Delivery visibility | `email_log` records every send; shown on the request page with a copy-link fallback |
+| Throughput | Fan-out moved to `ctx.waitUntil`, so a large batch no longer blocks the response on dozens of sequential provider calls |
+| Reminders | Cover `PENDING_COACH` as well as `PENDING_APPROVAL`, capped at four with escalation, batched per tick |
+| Expiry | `EXPIRED` is now actually set by the cron, which also frees the duplicate guard for corrected resubmissions |
+| Terms | Premiums and deadlines live once in `shared/terms.ts`; the dropdown resolves each term's year from its own deadline |
+| Approval rule | `sports_programs.single_approval` replaces the hardcoded `womens_softball` string |
 
 ## Notes / follow-ups
 
+- The one-click anonymous Coach login is unchanged by product decision. A coach session
+  requires no verification and can read every request in the system, including student
+  names and Rocket numbers, and can sign the head-coach approval step.
 - Rate limiting is best-effort per-isolate; for globally-consistent limits, swap in a
-  Cloudflare `ratelimit` binding.
+  Cloudflare `ratelimit` binding. Login lockout is not affected, being D1-backed.
 - Backfilled head coaches inherit whatever email was on `sports_programs`; many are blank
   and should be filled in via **Sports & Coaches** so head-coach approval emails route.
+- DNS authentication improves inbox placement at Microsoft but does not guarantee it. If
+  the SCL stays at 5 or above after SPF, DKIM, and aligned DMARC all pass, the remaining
+  step is a UToledo IT allowlist entry. See the end of `EMAIL_SETUP.md`.

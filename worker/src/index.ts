@@ -2,10 +2,12 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import {
   hashPassword, verifyPassword, signJWT, getUser, setAuthCookie, clearAuthCookie,
+  sha256Hex, type JWTPayload,
 } from './lib/auth';
 import {
   notifyPendingSportAdmin, notifyPendingCFO, notifyExecuted, notifyVoided, notifyReminder,
   notifyCoachSubmitted, notifyStudentSubmitted, notifyPendingHeadCoach, notifyDenied,
+  notifyExpired, notifyPasswordReset, notifyRegistrationDecision, buildApprovalIcs,
   bytesToBase64, type EmailData, type EmailAttachment,
 } from './lib/email';
 import {
@@ -22,30 +24,24 @@ export interface Env {
   CFO_EMAIL: string;
   FROM_NAME?: string;
   FROM_EMAIL: string;
+  /** Monitored mailbox recipients can actually reply to. Absent = no Reply-To header. */
+  REPLY_TO_EMAIL?: string;
   APP_BASE_URL: string;
   RESEND_API_KEY?: string;
-  DEV_MODE?: string;
   ASSETS: Fetcher;
 }
 
-const TOKEN_EXPIRATION_SECONDS = 60 * 60; // 1 hour
+const TOKEN_EXPIRATION_SECONDS = 60 * 60; // password-reset link lifetime: 1 hour
+const SESSION_SECONDS = 60 * 60 * 24 * 7; // auth cookie lifetime: 7 days
 
-const CREATE_RESET_TOKENS_TABLE = `
-  CREATE TABLE IF NOT EXISTS password_reset_tokens (
-    token TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    expires_at INTEGER NOT NULL,
-    used INTEGER NOT NULL DEFAULT 0
-  )
-`;
+// Per-account login backoff. The IP limiter below is per-isolate and in-memory, so
+// it resets whenever the isolate recycles; this counter lives in D1 and does not.
+const MAX_FAILED_LOGINS = 8;
+const LOCKOUT_MINUTES = 15;
 
-const CREATE_APP_SETTINGS_TABLE = `
-  CREATE TABLE IF NOT EXISTS app_settings (
-    setting_key TEXT PRIMARY KEY,
-    setting_value TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-  )
-`;
+// Anonymous one-click Coach sessions have no `users` row by design, so they are
+// exempt from the database re-check in currentUser().
+const ANON_COACH_PREFIX = 'coach_anonymous_';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -105,8 +101,50 @@ app.use('/api/requests/:id/resubmit', rateLimit(10, 60));
 app.use('/auth/login', rateLimit(15, 60));
 app.use('/auth/forgot-password', rateLimit(5, 60));
 app.use('/auth/reset-password', rateLimit(10, 60));
+app.use('/auth/select', rateLimit(20, 60));
+app.use('/auth/register', rateLimit(5, 60));
 
 // ── Auth helpers ──────────────────────────────────────────────────────────────
+
+type AuthedContext = { req: { raw: Request }; env: Env };
+
+/**
+ * Resolve the caller from the auth cookie, then re-validate against the database.
+ *
+ * A JWT alone is not enough: the cookie lives for 7 days, so a token issued before
+ * an account was deleted, rejected, or had its password reset would otherwise keep
+ * working for the rest of that week. Every request re-reads the user row and checks
+ * that the account still exists, is still active, and that the token's `tv` still
+ * matches `users.token_version`. Role, name, and email come from the row rather than
+ * the token, so a role change takes effect immediately.
+ *
+ * Anonymous Coach sessions (issued by POST /auth/select) have no user row and are
+ * returned as-is.
+ */
+async function currentUser(c: AuthedContext): Promise<JWTPayload | null> {
+  const payload = await getUser(c.req.raw, c.env.JWT_SECRET);
+  if (!payload) return null;
+  if (payload.sub.startsWith(ANON_COACH_PREFIX)) return payload;
+
+  const row = await c.env.DB.prepare(
+    'SELECT email, name, role, sport_id, status, token_version FROM users WHERE id = ?'
+  ).bind(payload.sub).first<{
+    email: string; name: string; role: string;
+    sport_id: string | null; status: string | null; token_version: number | null;
+  }>();
+
+  if (!row) return null;                                              // account deleted
+  if ((row.status ?? 'active') !== 'active') return null;             // pending / rejected
+  if ((row.token_version ?? 0) !== (payload.tv ?? 0)) return null;    // session revoked
+
+  return {
+    ...payload,
+    email: row.email,
+    name: row.name,
+    role: row.role as JWTPayload['role'],
+    sportId: row.sport_id ?? undefined,
+  };
+}
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -136,30 +174,27 @@ const isSecure = (req: Request) =>
   new URL(req.url).protocol === 'https:';
 
 const DEFAULT_FROM_NAME = 'Athletics Business Office';
-type PortalSettings = { fromName: string; fromEmail: string; appBaseUrl: string };
-
-async function ensureAppSettingsTable(env: Env): Promise<void> {
-  await env.DB.prepare(CREATE_APP_SETTINGS_TABLE).run();
-}
+type PortalSettings = { fromName: string; fromEmail: string; appBaseUrl: string; replyTo: string };
 
 async function getPortalSettings(env: Env): Promise<PortalSettings> {
   const defaults: PortalSettings = {
     fromName: env.FROM_NAME?.trim() || DEFAULT_FROM_NAME,
     fromEmail: env.FROM_EMAIL,
     appBaseUrl: env.APP_BASE_URL,
+    replyTo: env.REPLY_TO_EMAIL?.trim() || '',
   };
 
   try {
-    await ensureAppSettingsTable(env);
     const { results } = await env.DB.prepare(
       `SELECT setting_key, setting_value FROM app_settings
-       WHERE setting_key IN ('from_name', 'from_email', 'app_base_url')`
+       WHERE setting_key IN ('from_name', 'from_email', 'app_base_url', 'reply_to')`
     ).all<{ setting_key: string; setting_value: string }>();
     const map = new Map(results.map(r => [r.setting_key, r.setting_value]));
     return {
       fromName: (map.get('from_name') || defaults.fromName).trim() || defaults.fromName,
       fromEmail: (map.get('from_email') || defaults.fromEmail).trim() || defaults.fromEmail,
       appBaseUrl: (map.get('app_base_url') || defaults.appBaseUrl).trim() || defaults.appBaseUrl,
+      replyTo: (map.get('reply_to') || defaults.replyTo).trim(),
     };
   } catch {
     // If settings storage is unavailable, safely fall back to env vars.
@@ -174,7 +209,29 @@ async function getConfiguredEnv(env: Env): Promise<Env> {
     FROM_NAME: settings.fromName,
     FROM_EMAIL: settings.fromEmail,
     APP_BASE_URL: settings.appBaseUrl,
+    REPLY_TO_EMAIL: settings.replyTo,
   };
+}
+
+const DEFAULT_PAGE_SIZE = 50;
+const MAX_PAGE_SIZE = 500;
+/** Upper bound on the on-screen financial report. The CSV export is unbounded. */
+const REPORT_ROW_CAP = 5000;
+
+/**
+ * Bounded limit/offset for list endpoints.
+ *
+ * These queries had no LIMIT, so a full season across sixteen sports came back as one
+ * response and rendered as one table. The cap applies even when the caller sends no
+ * paging parameters at all.
+ */
+function pageParams(c: { req: { query: () => Record<string, string> } }): { limit: number; offset: number } {
+  const q = c.req.query();
+  const rawLimit = parseInt(q.limit ?? '', 10);
+  const rawOffset = parseInt(q.offset ?? '', 10);
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, MAX_PAGE_SIZE) : DEFAULT_PAGE_SIZE;
+  const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? rawOffset : 0;
+  return { limit, offset };
 }
 
 const EMAIL_SIMPLE_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -191,16 +248,26 @@ function isValidHttpUrl(value: string): boolean {
 
 const FUNDING_SOURCES = ['operating_budget', 'foundation_account'] as const;
 
-// Softball's sport administrator IS the CFO (Melissa DeAngelo), so a single CFO
-// approval is sufficient; every other sport needs both Sport Admin and CFO.
-const isSoftball = (sport: string) => sport === 'womens_softball';
+/**
+ * Whether a sport finalizes on the CFO signature alone.
+ *
+ * Softball's sport administrator is the CFO, so a second signature would be the same
+ * person twice. This used to be a hardcoded `sport === 'womens_softball'` check, which
+ * broke silently if the sport was renamed or recreated from the admin UI. It is now a
+ * column on sports_programs that the Sports and Coaches page maintains.
+ */
+async function isSingleApproval(env: Env, sportId: string): Promise<boolean> {
+  const row = await env.DB.prepare('SELECT single_approval FROM sports_programs WHERE id = ?')
+    .bind(sportId).first<{ single_approval: number | null }>();
+  return !!row?.single_approval;
+}
 
 const clientIp = (c: { req: { header: (k: string) => string | undefined } }) =>
   c.req.header('cf-connecting-ip') ?? c.req.header('x-forwarded-for') ?? 'unknown';
 
 /** Write an audit-log row capturing the actor and originating IP (3.3). */
 async function audit(
-  env: Env, requestId: string, action: string, performedBy: string,
+  env: Env, requestId: string | null, action: string, performedBy: string,
   details: Record<string, unknown> | null, ip?: string,
 ): Promise<void> {
   await env.DB.prepare(
@@ -214,8 +281,23 @@ async function hasAllApprovals(env: Env, id: string, sport: string): Promise<boo
     `SELECT signatory_role FROM signatures WHERE request_id = ? AND signatory_role IN ('SPORT_ADMIN', 'CFO')`
   ).bind(id).all<{ signatory_role: string }>();
   const roles = new Set(results.map(r => r.signatory_role));
-  if (isSoftball(sport)) return roles.has('CFO');
+  if (await isSingleApproval(env, sport)) return roles.has('CFO');
   return roles.has('SPORT_ADMIN') && roles.has('CFO');
+}
+
+/** Every active CFO account's email, so notifications are not pinned to an env var. */
+async function getCfoEmails(env: Env): Promise<string[]> {
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT email FROM users WHERE role = 'cfo' AND status = 'active'
+       UNION
+       SELECT email FROM sport_administrators WHERE is_cfo = 1`
+    ).all<{ email: string }>();
+    const list = [...new Set(results.map(r => r.email).filter(Boolean))];
+    return list.length ? list : [env.CFO_EMAIL].filter(Boolean);
+  } catch {
+    return [env.CFO_EMAIL].filter(Boolean);
+  }
 }
 
 /**
@@ -321,7 +403,9 @@ async function loadRequestEmailData(env: Env, id: string): Promise<EmailData | n
   const sportId = r.sport as string;
   const headCoach = await getHeadCoachForSport(env, sportId);
   const sportAdminEmails = await getSportAdminEmailsForSport(env, sportId);
+  const cfoEmails = await getCfoEmails(env);
   return {
+    cfoEmails,
     studentName: r.student_name as string,
     rocketNumber: r.rocket_number as string,
     studentEmail: (r.student_email as string) || undefined,
@@ -414,6 +498,48 @@ async function buildRequestPdfAttachment(env: Env, id: string): Promise<EmailAtt
   }
 }
 
+// ── Deferred notification ─────────────────────────────────────────────────────
+
+type NotifyContext = { env: Env; executionCtx: ExecutionContext };
+
+/**
+ * Run notification fan-out after the response has been returned.
+ *
+ * Sends used to be awaited inline. A 50-athlete bulk submit therefore issued roughly
+ * 150 sequential provider calls plus their D1 writes inside a single Worker
+ * invocation, which exhausts the subrequest budget and times out. waitUntil keeps the
+ * work attached to the same invocation without making the caller wait for it, and a
+ * failure in here can no longer fail the approval action that triggered it.
+ */
+function deferNotify(c: NotifyContext, run: (mailEnv: Env) => Promise<void>): void {
+  const task = (async () => {
+    try {
+      await run(await getConfiguredEnv(c.env));
+    } catch (e) {
+      console.warn(`[notify] deferred send failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  })();
+  try {
+    c.executionCtx.waitUntil(task);
+  } catch {
+    // No execution context (unit tests, direct app.fetch calls): let it run detached.
+    void task;
+  }
+}
+
+/** Load a request's email payload, stamp the new status, then send, all deferred. */
+function deferRequestNotify(
+  c: NotifyContext, id: string, status: string,
+  run: (mailEnv: Env, d: EmailData) => Promise<void>,
+): void {
+  deferNotify(c, async mailEnv => {
+    const d = await loadRequestEmailData(c.env, id);
+    if (!d) return;
+    d.status = status;
+    await run(mailEnv, d);
+  });
+}
+
 /** On submission: confirm to coach + student and ask the head coach to approve (Step 1). */
 async function notifyOnCreate(env: Env, d: EmailData, headCoachEmail?: string): Promise<void> {
   await notifyCoachSubmitted(env, d);
@@ -423,7 +549,7 @@ async function notifyOnCreate(env: Env, d: EmailData, headCoachEmail?: string): 
 
 /** After the head coach approves: ask the Sport Admin(s) and CFO to act (Step 2). */
 async function notifyApprovers(env: Env, d: EmailData): Promise<void> {
-  if (!isSoftball(d.sport) && d.sportAdminEmails?.length) {
+  if (!(await isSingleApproval(env, d.sport)) && d.sportAdminEmails?.length) {
     await notifyPendingSportAdmin(env, d, d.sportAdminEmails);
   }
   await notifyPendingCFO(env, d);
@@ -453,8 +579,13 @@ app.post('/auth/setup', async c => {
   await c.env.DB.prepare(
     'INSERT INTO users (id, email, password_hash, name, role, sport_id) VALUES (?, ?, ?, ?, ?, ?)'
   ).bind(id, email.toLowerCase(), passwordHash, name, role, sportId ?? null).run();
+  const now = Math.floor(Date.now() / 1000);
   const token = await signJWT(
-    { sub: id, email: email.toLowerCase(), name, role: role as 'coach' | 'sport_admin' | 'cfo' | 'super_admin', iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 },
+    {
+      sub: id, email: email.toLowerCase(), name,
+      role: role as 'coach' | 'sport_admin' | 'cfo' | 'super_admin',
+      tv: 0, iat: now, exp: now + SESSION_SECONDS,
+    },
     c.env.JWT_SECRET
   );
   return new Response(JSON.stringify({ id, email: email.toLowerCase(), name, role }), {
@@ -468,15 +599,40 @@ app.post('/auth/setup', async c => {
 
 // POST /auth/login
 app.post('/auth/login', async c => {
-  const { email, password } = await c.req.json<{ email: string; password: string }>();
+  const { email, password } = await c.req.json<{ email: string; password: string }>()
+    .catch(() => ({ email: '', password: '' }));
   if (!email || !password) return err('Email and password required');
+
   const user = await c.env.DB.prepare(
-    'SELECT id, email, password_hash, name, role, sport_id, must_change_password, status FROM users WHERE email = ?'
-  ).bind(email.toLowerCase()).first<{ id: string; email: string; password_hash: string; name: string; role: string; sport_id: string | null; must_change_password: number; status: string | null }>();
-  if (!user || !(await verifyPassword(password, user.password_hash))) {
-    return err('Invalid email or password', 401);
+    `SELECT id, email, password_hash, name, role, sport_id, must_change_password, status,
+            token_version, failed_login_count, locked_until
+     FROM users WHERE email = ?`
+  ).bind(email.toLowerCase().trim()).first<{
+    id: string; email: string; password_hash: string; name: string; role: string;
+    sport_id: string | null; must_change_password: number; status: string | null;
+    token_version: number | null; failed_login_count: number | null; locked_until: string | null;
+  }>();
+
+  // Uniform failure message so the endpoint cannot be used to enumerate accounts.
+  const invalid = () => err('Invalid email or password', 401);
+  if (!user) return invalid();
+
+  if (user.locked_until && Date.parse(user.locked_until) > Date.now()) {
+    const mins = Math.max(1, Math.ceil((Date.parse(user.locked_until) - Date.now()) / 60000));
+    return err(`Too many failed sign-in attempts. Try again in ${mins} minute${mins === 1 ? '' : 's'}.`, 429);
   }
-  // Check account status
+
+  if (!(await verifyPassword(password, user.password_hash))) {
+    const attempts = (user.failed_login_count ?? 0) + 1;
+    const lockUntil = attempts >= MAX_FAILED_LOGINS
+      ? new Date(Date.now() + LOCKOUT_MINUTES * 60_000).toISOString()
+      : null;
+    await c.env.DB.prepare(
+      'UPDATE users SET failed_login_count = ?, locked_until = ? WHERE id = ?'
+    ).bind(lockUntil ? 0 : attempts, lockUntil, user.id).run();
+    return invalid();
+  }
+
   const userStatus = user.status ?? 'active';
   if (userStatus === 'pending') {
     return err('Your account is pending approval. A Super Admin will review it shortly.', 403);
@@ -484,19 +640,29 @@ app.post('/auth/login', async c => {
   if (userStatus === 'rejected') {
     return err('Your account request has been rejected.', 403);
   }
-  const payload = {
+
+  if (user.failed_login_count || user.locked_until) {
+    await c.env.DB.prepare(
+      'UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE id = ?'
+    ).bind(user.id).run();
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const token = await signJWT({
     sub: user.id,
     email: user.email,
     name: user.name,
     role: user.role as 'coach' | 'sport_admin' | 'cfo' | 'super_admin',
     sportId: user.sport_id ?? undefined,
-    iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7,
-  };
-  const token = await signJWT(payload, c.env.JWT_SECRET);
+    tv: user.token_version ?? 0,
+    iat: now,
+    exp: now + SESSION_SECONDS,
+  }, c.env.JWT_SECRET);
+
   return new Response(JSON.stringify({
     id: user.id, email: user.email, name: user.name, role: user.role,
     sportId: user.sport_id, mustChangePassword: user.must_change_password,
+    status: userStatus,
   }), {
     status: 200,
     headers: {
@@ -519,114 +685,132 @@ app.post('/auth/logout', c => {
 
 // PUT /auth/password — change own password
 app.put('/auth/password', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
   const { currentPassword, newPassword } = await c.req.json<{ currentPassword: string; newPassword: string }>();
   if (!currentPassword || !newPassword) return err('Missing fields');
   if (newPassword.length < 8) return err('Password must be at least 8 characters');
+  if (currentPassword === newPassword) return err('New password must differ from the current one');
+
   const dbUser = await c.env.DB.prepare(
-    'SELECT password_hash FROM users WHERE id = ?'
-  ).bind(user.sub).first<{ password_hash: string }>();
+    'SELECT password_hash, token_version FROM users WHERE id = ?'
+  ).bind(user.sub).first<{ password_hash: string; token_version: number | null }>();
   if (!dbUser || !(await verifyPassword(currentPassword, dbUser.password_hash))) {
     return err('Current password is incorrect', 401);
   }
+
+  // Bumping token_version revokes every cookie already issued for this account, so a
+  // stolen session does not survive a password change. Any outstanding reset links are
+  // dropped for the same reason.
+  const newTv = (dbUser.token_version ?? 0) + 1;
   const newHash = await hashPassword(newPassword);
-  await c.env.DB.prepare(
-    'UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?'
-  ).bind(newHash, user.sub).run();
-  return json({ ok: true });
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      'UPDATE users SET password_hash = ?, must_change_password = 0, token_version = ? WHERE id = ?'
+    ).bind(newHash, newTv, user.sub),
+    c.env.DB.prepare('DELETE FROM password_reset_tokens WHERE user_id = ?').bind(user.sub),
+  ]);
+
+  // Re-issue this caller's own cookie at the new version so they stay signed in.
+  const now = Math.floor(Date.now() / 1000);
+  const token = await signJWT(
+    { ...user, tv: newTv, iat: now, exp: now + SESSION_SECONDS },
+    c.env.JWT_SECRET,
+  );
+  return new Response(JSON.stringify({ ok: true }), {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json',
+      'Set-Cookie': setAuthCookie(token, isSecure(c.req.raw)),
+    },
+  });
 });
 
 // POST /auth/forgot-password — send a password reset email
 app.post('/auth/forgot-password', async c => {
-  const { email } = await c.req.json<{ email: string }>();
+  const { email } = await c.req.json<{ email: string }>().catch(() => ({ email: '' }));
   if (!email?.trim()) return err('Email is required');
+  const address = email.toLowerCase().trim();
 
   const dbUser = await c.env.DB.prepare(
     'SELECT id, name FROM users WHERE email = ? AND status = ?'
-  ).bind(email.toLowerCase().trim(), 'active').first<{ id: string; name: string }>();
+  ).bind(address, 'active').first<{ id: string; name: string }>();
 
   if (dbUser) {
-    await c.env.DB.prepare(CREATE_RESET_TOKENS_TABLE).run();
-
-    const token = newUUID();
+    // The token is emailed in the clear but only its SHA-256 digest is stored, so a
+    // database read cannot be turned into a working reset link.
+    const token = `${newUUID()}${newUUID()}`.replace(/-/g, '');
     const expiresAt = Math.floor(Date.now() / 1000) + TOKEN_EXPIRATION_SECONDS;
 
-    await c.env.DB.prepare(
-      'INSERT INTO password_reset_tokens (token, user_id, expires_at, used) VALUES (?, ?, ?, 0)'
-    ).bind(token, dbUser.id, expiresAt).run();
+    await c.env.DB.batch([
+      // One live link at a time: requesting a new one retires the previous.
+      c.env.DB.prepare('DELETE FROM password_reset_tokens WHERE user_id = ?').bind(dbUser.id),
+      c.env.DB.prepare(
+        'INSERT INTO password_reset_tokens (token_hash, user_id, expires_at, used) VALUES (?, ?, ?, 0)'
+      ).bind(await sha256Hex(token), dbUser.id, expiresAt),
+    ]);
 
-    const settings = await getPortalSettings(c.env);
-    const resetUrl = `${settings.appBaseUrl}/reset-password?token=${token}`;
-
-    if (c.env.RESEND_API_KEY) {
-      await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${c.env.RESEND_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from: `${settings.fromName} <${settings.fromEmail}>`,
-          to: email.toLowerCase().trim(),
-          subject: 'Athletics Insurance Portal — Password Reset',
-          html: `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px"><h2 style="color:#003DA5">Password Reset Request</h2><p>Hi ${dbUser.name},</p><p>We received a request to reset your password for the University of Toledo Athletics Insurance Portal.</p><p><a href="${resetUrl}" style="background:#003DA5;color:white;padding:10px 20px;border-radius:6px;text-decoration:none;display:inline-block;margin:12px 0">Reset My Password</a></p><p style="color:#666;font-size:14px">This link will expire in 1 hour. If you did not request a password reset, please ignore this email.</p><hr style="margin-top:30px;border:none;border-top:1px solid #eee"/><p style="color:#888;font-size:12px">University of Toledo Athletics — Health Insurance Request System</p></div>`,
-        }),
-      }).catch(() => {/* ignore email send errors */});
-    }
+    deferNotify(c, mailEnv => notifyPasswordReset(mailEnv, address, dbUser.name, token));
   }
 
+  // Always the same response, whether or not the account exists.
   return json({ message: 'If an account with that email exists, a reset link has been sent.' });
 });
 
 // POST /auth/reset-password — reset password with token
 app.post('/auth/reset-password', async c => {
-  const { token, newPassword } = await c.req.json<{ token: string; newPassword: string }>();
+  const { token, newPassword } = await c.req.json<{ token: string; newPassword: string }>()
+    .catch(() => ({ token: '', newPassword: '' }));
   if (!token || !newPassword) return err('Missing required fields');
   if (newPassword.length < 8) return err('Password must be at least 8 characters');
 
-  await c.env.DB.prepare(CREATE_RESET_TOKENS_TABLE).run();
-
   const resetToken = await c.env.DB.prepare(
-    'SELECT user_id, expires_at, used FROM password_reset_tokens WHERE token = ?'
-  ).bind(token).first<{ user_id: string; expires_at: number; used: number }>();
+    'SELECT user_id, expires_at, used FROM password_reset_tokens WHERE token_hash = ?'
+  ).bind(await sha256Hex(token)).first<{ user_id: string; expires_at: number; used: number }>();
 
   if (!resetToken) return err('Invalid or expired reset link', 400);
   if (resetToken.used) return err('This reset link has already been used', 400);
   if (Math.floor(Date.now() / 1000) > resetToken.expires_at) return err('This reset link has expired', 400);
 
+  const target = await c.env.DB.prepare('SELECT token_version FROM users WHERE id = ?')
+    .bind(resetToken.user_id).first<{ token_version: number | null }>();
+  if (!target) return err('Invalid or expired reset link', 400);
+
   const newHash = await hashPassword(newPassword);
-  await c.env.DB.prepare(
-    'UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?'
-  ).bind(newHash, resetToken.user_id).run();
+  // Bump token_version so any session opened with the old password stops working, and
+  // clear every other outstanding link for this account.
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      'UPDATE users SET password_hash = ?, must_change_password = 0, token_version = ?, failed_login_count = 0, locked_until = NULL WHERE id = ?'
+    ).bind(newHash, (target.token_version ?? 0) + 1, resetToken.user_id),
+    c.env.DB.prepare('DELETE FROM password_reset_tokens WHERE user_id = ?').bind(resetToken.user_id),
+  ]);
 
-  await c.env.DB.prepare(
-    'UPDATE password_reset_tokens SET used = 1 WHERE token = ?'
-  ).bind(token).run();
-
-  return json({ ok: true });
+  // The caller may be holding a now-revoked cookie; clear it so they land on login.
+  return new Response(JSON.stringify({ ok: true }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json', 'Set-Cookie': clearAuthCookie() },
+  });
 });
 
 // GET /auth/me
+// Returns live values from the database (see currentUser), not the token's snapshot,
+// so a role change or a pending forced password change is visible immediately.
 app.get('/auth/me', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
-  return json({ id: user.sub, email: user.email, name: user.name, role: user.role, sportId: user.sportId });
-});
 
-// GET /auth/identities — list coaches, sport admins, and CFO for identity selection
-app.get('/auth/identities', async c => {
-  const { results: coaches } = await c.env.DB.prepare(`
-    SELECT id as sportId, name as sportName, gender, head_coach as coachName
-    FROM sports_programs WHERE head_coach IS NOT NULL ORDER BY name
-  `).all();
-  const { results: admins } = await c.env.DB.prepare(`
-    SELECT id, name, title FROM sport_administrators WHERE is_cfo = 0 ORDER BY name
-  `).all();
-  const cfo = await c.env.DB.prepare(`
-    SELECT id, name, title FROM sport_administrators WHERE is_cfo = 1
-  `).first();
-  return json({ coaches, admins, cfo });
+  let mustChangePassword = 0;
+  if (!user.sub.startsWith(ANON_COACH_PREFIX)) {
+    const row = await c.env.DB.prepare('SELECT must_change_password FROM users WHERE id = ?')
+      .bind(user.sub).first<{ must_change_password: number | null }>();
+    mustChangePassword = row?.must_change_password ?? 0;
+  }
+
+  return json({
+    id: user.sub, email: user.email, name: user.name, role: user.role,
+    sportId: user.sportId, mustChangePassword,
+  });
 });
 
 // POST /auth/select — select identity (no password required)
@@ -641,15 +825,16 @@ app.post('/auth/select', async c => {
   const email = 'anonymous@coaches.utoledo.edu';
   const name = 'Coach';
 
-  const sub = `coach_anonymous_${newUUID()}`;
+  const now = Math.floor(Date.now() / 1000);
+  const sub = `${ANON_COACH_PREFIX}${newUUID()}`;
   const payload = {
     sub,
     email,
     name,
     role: 'coach' as const,
     sportId: undefined,
-    iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7,
+    iat: now,
+    exp: now + SESSION_SECONDS,
   };
 
   const token = await signJWT(payload, c.env.JWT_SECRET);
@@ -709,7 +894,7 @@ app.get('/api/sports', async c => {
 
 // GET /api/admin/sport-admins — list selectable sport administrators (admin only)
 app.get('/api/admin/sport-admins', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
   const { results } = await c.env.DB.prepare(
     'SELECT id, name, title, email, is_cfo as isCfo FROM sport_administrators ORDER BY name'
@@ -721,10 +906,11 @@ app.get('/api/admin/sport-admins', async c => {
 
 // GET /api/requests — list (filtered by role)
 app.get('/api/requests', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
 
   const { sport, term, status, coach } = c.req.query();
+  const { limit, offset } = pageParams(c);
 
   let query = `
     SELECT ir.id, ir.student_name as studentName, ir.rocket_number as rocketNumber,
@@ -759,16 +945,17 @@ app.get('/api/requests', async c => {
   if (status) { query += ' AND ir.status = ?'; params.push(status); }
   if (coach) { query += ' AND (ir.coach_name LIKE ? OR ir.coach_email LIKE ?)'; params.push(`%${coach}%`, `%${coach}%`); }
 
-  query += ' ORDER BY ir.created_at DESC';
+  query += ' ORDER BY ir.created_at DESC LIMIT ? OFFSET ?';
+  params.push(limit, offset);
 
-  const stmt = params.reduce((s, p) => s.bind(p), c.env.DB.prepare(query));
+  const stmt = c.env.DB.prepare(query).bind(...params);
   const { results } = await stmt.all();
   return json(results);
 });
 
 // POST /api/requests — create (bulk)
 app.post('/api/requests', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
   if (user.role !== 'coach') return err('Only coaches can submit requests', 403);
 
@@ -815,66 +1002,99 @@ app.post('/api/requests', async c => {
   }
   const coachName = body.coachName?.trim() || sportRow.head_coach?.trim() || '';
 
-  const created = [];
-  const newIds: string[] = [];
+  const initialStatus = 'PENDING_COACH';
+
+  // Validate the whole batch before writing anything.
+  //
+  // This loop used to insert as it validated, so a bad athlete part-way through left the
+  // earlier ones committed with their emails already sent while the coach saw a 400.
+  // Retrying then collided with the duplicate guard on the rows that did land. Nothing
+  // is written until every athlete passes.
+  const prepared: {
+    id: string; studentName: string; rocketNumber: string; studentEmail: string | null;
+  }[] = [];
+  const seenInBatch = new Set<string>();
 
   for (const athlete of body.athletes) {
-    if (!athlete.studentName?.trim()) return err('Student name is required');
-    if (!validateRocketNumber(athlete.rocketNumber)) {
+    const studentName = athlete.studentName?.trim();
+    if (!studentName) return err('Student name is required');
+
+    const rocketNumber = athlete.rocketNumber?.trim().toUpperCase() ?? '';
+    if (!validateRocketNumber(rocketNumber)) {
       return err(`Invalid Rocket Number: ${athlete.rocketNumber}`);
     }
+
     const studentEmail = athlete.email?.trim() || null;
-    if (studentEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(studentEmail)) {
-      return err(`Invalid email for ${athlete.studentName.trim()}`);
+    if (studentEmail && !EMAIL_SIMPLE_RE.test(studentEmail)) {
+      return err(`Invalid email for ${studentName}`);
     }
+
+    // Same athlete twice in one submission would satisfy the duplicate check
+    // individually and then violate the unique index at write time.
+    if (seenInBatch.has(rocketNumber)) {
+      return err(`${rocketNumber} appears more than once in this submission`, 409);
+    }
+    seenInBatch.add(rocketNumber);
 
     // Duplicate guard (2.1): block a second active request for the same student + term.
     const duplicate = await c.env.DB.prepare(
       `SELECT student_name, status FROM insurance_requests
        WHERE rocket_number = ? AND term = ? AND status NOT IN ('VOIDED', 'DENIED', 'EXPIRED') LIMIT 1`
-    ).bind(athlete.rocketNumber, body.term).first<{ student_name: string; status: string }>();
+    ).bind(rocketNumber, body.term).first<{ student_name: string; status: string }>();
     if (duplicate) {
       return err(`A request for ${duplicate.student_name} in ${body.term} already exists (status: ${prettyStatus(duplicate.status)})`, 409);
     }
 
-    const id = newUUID();
-    const initialStatus = 'PENDING_COACH';
+    prepared.push({ id: newUUID(), studentName, rocketNumber, studentEmail });
+  }
 
-    await c.env.DB.prepare(`
+  const actor = coachName || user.name || 'Coach';
+  const auditDetails = JSON.stringify({
+    status: initialStatus, fundingSource,
+    ...(body.parentRequestId ? { resubmissionOf: body.parentRequestId } : {}),
+  });
+
+  // One batch, so the whole submission lands or none of it does.
+  await c.env.DB.batch(prepared.flatMap(p => [
+    c.env.DB.prepare(`
       INSERT INTO insurance_requests
         (id, student_name, rocket_number, student_email, sport, term, premium_cost, funding_source, status, coach_email, coach_name, parent_request_id)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
-      id, athlete.studentName.trim(), athlete.rocketNumber, studentEmail, sport,
+      p.id, p.studentName, p.rocketNumber, p.studentEmail, sport,
       body.term, premiumCost, fundingSource, initialStatus, coachEmail, coachName,
       body.parentRequestId || null,
-    ).run();
-
-    await audit(c.env, id, 'SUBMITTED', coachName || user.name || 'Coach',
-      { status: initialStatus, fundingSource, ...(body.parentRequestId ? { resubmissionOf: body.parentRequestId } : {}) }, ip);
-
-    newIds.push(id);
-    created.push({ id, studentName: athlete.studentName.trim(), rocketNumber: athlete.rocketNumber, studentEmail, sport, term: body.term, premiumCost, fundingSource, status: initialStatus, coachEmail, coachName });
-  }
+    ),
+    c.env.DB.prepare(
+      `INSERT INTO audit_log (id, request_id, action, performed_by, details, ip_address)
+       VALUES (?, ?, 'SUBMITTED', ?, ?, ?)`
+    ).bind(newUUID(), p.id, actor, auditDetails, ip),
+  ]));
 
   // Confirm to coach + student and route the Step-1 approval email to the head coach
-  // (or active delegate) of the sport (1.1).
-  const headCoach = await getHeadCoachForSport(c.env, sport);
-  for (const id of newIds) {
-    const d = await loadRequestEmailData(c.env, id);
-    if (d) {
-      d.status = 'PENDING_COACH';
-      const mailEnv = await getConfiguredEnv(c.env);
+  // (or active delegate) of the sport (1.1). Deferred so a large batch does not block
+  // the response on dozens of sequential provider calls.
+  deferNotify(c, async mailEnv => {
+    const headCoach = await getHeadCoachForSport(c.env, sport);
+    for (const p of prepared) {
+      const d = await loadRequestEmailData(c.env, p.id);
+      if (!d) continue;
+      d.status = initialStatus;
       await notifyOnCreate(mailEnv, d, headCoach?.email);
     }
-  }
+  });
 
+  const created = prepared.map(p => ({
+    id: p.id, studentName: p.studentName, rocketNumber: p.rocketNumber,
+    studentEmail: p.studentEmail, sport, term: body.term, premiumCost, fundingSource,
+    status: initialStatus, coachEmail, coachName,
+  }));
   return json(created, 201);
 });
 
 // GET /api/requests/:id
 app.get('/api/requests/:id', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
   const { id } = c.req.param();
 
@@ -915,7 +1135,7 @@ app.get('/api/requests/:id', async c => {
 
 // POST /api/requests/:id/sign — in-app signing for sport admin, CFO, and super_admin
 app.post('/api/requests/:id/sign', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
   if (user.role !== 'coach' && user.role !== 'sport_admin' && user.role !== 'cfo' && user.role !== 'super_admin') {
     return err('Only authorized roles can sign in-app', 403);
@@ -956,7 +1176,7 @@ app.post('/api/requests/:id/sign', async c => {
     // super_admin fills whichever required approval is still outstanding
     if (req.status !== 'PENDING_APPROVAL') return err('This request is not awaiting approval', 409);
     if (!signedRoles.has('CFO')) sigRole = 'CFO';
-    else if (!signedRoles.has('SPORT_ADMIN') && !isSoftball(req.sport)) sigRole = 'SPORT_ADMIN';
+    else if (!signedRoles.has('SPORT_ADMIN') && !(await isSingleApproval(c.env, req.sport))) sigRole = 'SPORT_ADMIN';
     else return err('All required approvals are already recorded', 409);
   }
 
@@ -977,21 +1197,20 @@ app.post('/api/requests/:id/sign', async c => {
     VALUES (?, ?, ?, ?, ?, ?)
   `).bind(newUUID(), id, sigRole, user.email || '', signatoryName, ip).run();
 
-  await audit(c.env, id, sigRole === 'COACH' ? 'HEAD_COACH_APPROVED' : 'SIGNED',
-    user.email || signatoryName, { role: sigRole }, ip);
+  // A super_admin can fill an approval that belongs to another role. That is a
+  // legitimate break-glass path, but it lets one person execute a request on their own,
+  // so it is recorded distinctly rather than as an ordinary signature.
+  const breakGlass = user.role === 'super_admin';
+  await audit(c.env, id, sigRole === 'COACH' ? 'HEAD_COACH_APPROVED' : (breakGlass ? 'SIGNED_ON_BEHALF' : 'SIGNED'),
+    user.email || signatoryName, { role: sigRole, ...(breakGlass ? { onBehalfOf: sigRole } : {}) }, ip);
 
   // Advance status + notify
   let newStatus: string;
   if (sigRole === 'COACH') {
     newStatus = 'PENDING_APPROVAL';
-    await c.env.DB.prepare('UPDATE insurance_requests SET status = ?, coach_name = ? WHERE id = ?')
+    await c.env.DB.prepare('UPDATE insurance_requests SET status = ?, coach_name = ?, reminder_count = 0 WHERE id = ?')
       .bind(newStatus, signatoryName, id).run();
-    const d = await loadRequestEmailData(c.env, id);
-    if (d) {
-      d.status = newStatus;
-      const mailEnv = await getConfiguredEnv(c.env);
-      await notifyApprovers(mailEnv, d);
-    }
+    deferRequestNotify(c, id, newStatus, notifyApprovers);
   } else {
     // Sport Admin or CFO approval — executed once all required approvals exist
     const allApproved = await hasAllApprovals(c.env, id, req.sport);
@@ -999,12 +1218,8 @@ app.post('/api/requests/:id/sign', async c => {
     await c.env.DB.prepare('UPDATE insurance_requests SET status = ? WHERE id = ?')
       .bind(newStatus, id).run();
     if (allApproved) {
-      const d = await loadRequestEmailData(c.env, id);
-      if (d) {
-        d.status = newStatus;
-        const mailEnv = await getConfiguredEnv(c.env);
-        await notifyExecuted(mailEnv, d, await buildRequestPdfAttachment(c.env, id));
-      }
+      deferRequestNotify(c, id, newStatus, async (mailEnv, d) =>
+        notifyExecuted(mailEnv, d, await buildRequestPdfAttachment(c.env, id)));
     }
   }
 
@@ -1013,13 +1228,26 @@ app.post('/api/requests/:id/sign', async c => {
 
 // GET /api/requests/:id/pdf — download completed authorization PDF
 app.get('/api/requests/:id/pdf', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
 
   const { id } = c.req.param();
 
+  // Same scoping the list/detail/sign routes apply. Without this, any session could
+  // fetch any student's signed authorization form by id.
+  const owner = await c.env.DB.prepare('SELECT sport FROM insurance_requests WHERE id = ?')
+    .bind(id).first<{ sport: string }>();
+  if (!owner) return err('Not found', 404);
+  if (user.role === 'sport_admin' && !(await sportAdminScopeIncludes(c.env, user, owner.sport))) {
+    return err('This request is outside your assigned sports', 403);
+  }
+
   const pdfData = await loadPdfFormData(c.env, id);
   if (!pdfData) return err('Not found', 404);
+  // An unsigned form has nothing to authorize; the UI already hides the button.
+  if (pdfData.signatures.length === 0) {
+    return err('This request has no signatures yet', 409);
+  }
 
   const logo     = await loadLogoPng(c.env);
   const pdfBytes = await buildInsuranceFormPdf(pdfData, logo);
@@ -1033,9 +1261,53 @@ app.get('/api/requests/:id/pdf', async c => {
   });
 });
 
+// GET /api/requests/:id/calendar — the approval-deadline .ics as a download.
+//
+// This used to ride along as an attachment on the first approval email. Calendar files
+// from an unrecognised sender are a strong quarantine trigger in Exchange Online, and
+// these messages are first contact from a new domain, so it is served here instead.
+app.get('/api/requests/:id/calendar', async c => {
+  const user = await currentUser(c);
+  if (!user) return err('Unauthorized', 401);
+  const { id } = c.req.param();
+
+  const d = await loadRequestEmailData(c.env, id);
+  if (!d) return err('Not found', 404);
+  if (user.role === 'sport_admin' && !(await sportAdminScopeIncludes(c.env, user, d.sport))) {
+    return err('This request is outside your assigned sports', 403);
+  }
+
+  const ics = buildApprovalIcs(await getConfiguredEnv(c.env), d);
+  if (!ics) return err('No deadline is set for this term', 404);
+
+  return new Response(atob(ics.content), {
+    headers: {
+      'Content-Type': 'text/calendar; charset=utf-8',
+      'Content-Disposition': `attachment; filename="insurance-deadline-${safeFilePart(d.rocketNumber)}.ics"`,
+    },
+  });
+});
+
+// GET /api/requests/:id/emails — delivery log for one request (CFO / Super Admin).
+//
+// Answers "did the head coach actually get it", which is the first question when an
+// approval stalls. Delivery to utoledo.edu is unreliable and a provider success only
+// means the receiving mail exchanger accepted the message.
+app.get('/api/requests/:id/emails', async c => {
+  const user = await currentUser(c);
+  if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
+  const { id } = c.req.param();
+  const { results } = await c.env.DB.prepare(`
+    SELECT id, to_email as toEmail, subject, template, provider_id as providerId,
+           status, error, created_at as createdAt
+    FROM email_log WHERE request_id = ? ORDER BY created_at DESC LIMIT 200
+  `).bind(id).all();
+  return json(results);
+});
+
 // POST /api/requests/:id/void — CFO or super_admin
 app.post('/api/requests/:id/void', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
   if (user.role !== 'cfo' && user.role !== 'super_admin') return err('Only CFO or Super Admin can void requests', 403);
 
@@ -1057,20 +1329,17 @@ app.post('/api/requests/:id/void', async c => {
     .bind('VOIDED', id).run();
   await audit(c.env, id, 'VOIDED', user.email, { reason: reason.trim() }, clientIp(c));
 
-  const d = await loadRequestEmailData(c.env, id);
-  if (d) {
-    d.status = 'VOIDED';
+  deferRequestNotify(c, id, 'VOIDED', (mailEnv, d) => {
     d.voidReason = reason.trim();
-    const mailEnv = await getConfiguredEnv(c.env);
-    await notifyVoided(mailEnv, d, pdf);
-  }
+    return notifyVoided(mailEnv, d, pdf);
+  });
 
   return json({ id, status: 'VOIDED' });
 });
 
 // POST /api/requests/:id/deny — deny a pending request with a reason (1.4).
 app.post('/api/requests/:id/deny', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
   if (!['coach', 'sport_admin', 'cfo', 'super_admin'].includes(user.role)) {
     return err('You are not permitted to deny requests', 403);
@@ -1097,20 +1366,17 @@ app.post('/api/requests/:id/deny', async c => {
     .bind('DENIED', reason.trim(), id).run();
   await audit(c.env, id, 'DENIED', user.email || user.name, { reason: reason.trim(), role: user.role }, clientIp(c));
 
-  const d = await loadRequestEmailData(c.env, id);
-  if (d) {
-    d.status = 'DENIED';
+  deferRequestNotify(c, id, 'DENIED', (mailEnv, d) => {
     d.denialReason = reason.trim();
-    const mailEnv = await getConfiguredEnv(c.env);
-    await notifyDenied(mailEnv, d);
-  }
+    return notifyDenied(mailEnv, d);
+  });
 
   return json({ id, status: 'DENIED' });
 });
 
 // POST /api/requests/:id/resubmit — clone a denied request as a fresh PENDING_COACH (1.5)
 app.post('/api/requests/:id/resubmit', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
   if (user.role !== 'coach' && user.role !== 'super_admin') {
     return err('Only the coach can resubmit a denied request', 403);
@@ -1129,7 +1395,7 @@ app.post('/api/requests/:id/resubmit', async c => {
   if (orig.status !== 'DENIED') return err('Only denied requests can be resubmitted', 409);
 
   const studentName = (overrides.studentName ?? (orig.student_name as string)).trim();
-  const rocketNumber = (overrides.rocketNumber ?? (orig.rocket_number as string)).trim();
+  const rocketNumber = (overrides.rocketNumber ?? (orig.rocket_number as string)).trim().toUpperCase();
   const term = overrides.term ?? (orig.term as string);
   const sport = orig.sport as string;
 
@@ -1161,31 +1427,32 @@ app.post('/api/requests/:id/resubmit', async c => {
 
   await audit(c.env, newId, 'RESUBMITTED', coachName || user.name, { resubmissionOf: id }, clientIp(c));
 
-  const headCoach = await getHeadCoachForSport(c.env, sport);
-  const d = await loadRequestEmailData(c.env, newId);
-  if (d) {
-    d.status = 'PENDING_COACH';
-    const mailEnv = await getConfiguredEnv(c.env);
+  deferRequestNotify(c, newId, 'PENDING_COACH', async (mailEnv, d) => {
+    const headCoach = await getHeadCoachForSport(c.env, sport);
     await notifyOnCreate(mailEnv, d, headCoach?.email);
-  }
+  });
 
   return json({ id: newId, status: 'PENDING_COACH', parentRequestId: id }, 201);
 });
 
 // DELETE /api/requests/bulk-delete — permanent bulk delete (Super Admin only)
 app.delete('/api/requests/bulk-delete', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
   if (user.role !== 'super_admin') return err('Only Super Admin can bulk delete requests', 403);
 
   const { ids } = await c.req.json<{ ids: string[] }>();
   if (!ids?.length) return err('No request IDs provided');
 
+  const ip = clientIp(c);
   let deleted = 0;
   for (const id of ids) {
-    const req = await c.env.DB.prepare('SELECT id FROM insurance_requests WHERE id = ?').bind(id).first();
+    const req = await c.env.DB.prepare(
+      'SELECT id, student_name, rocket_number, term, sport, status FROM insurance_requests WHERE id = ?'
+    ).bind(id).first<Record<string, unknown>>();
     if (!req) continue;
 
+    await writeDeletionTombstone(c.env, req, user.email || user.name, ip, true);
     await c.env.DB.batch([
       c.env.DB.prepare('DELETE FROM signatures WHERE request_id = ?').bind(id),
       c.env.DB.prepare('DELETE FROM audit_log WHERE request_id = ?').bind(id),
@@ -1197,17 +1464,49 @@ app.delete('/api/requests/bulk-delete', async c => {
   return json({ deleted });
 });
 
+/**
+ * Record that a request was destroyed before its audit rows go with it.
+ *
+ * A permanent delete cascades to audit_log, so without this the system forgets a
+ * record ever existed. The tombstone has a null request_id (the row it pointed at is
+ * gone) and carries enough identifying detail to reconstruct what was removed.
+ */
+async function writeDeletionTombstone(
+  env: Env, req: Record<string, unknown>, actor: string, ip: string, bulk: boolean,
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO audit_log (id, request_id, action, performed_by, details, ip_address)
+     VALUES (?, NULL, 'REQUEST_DELETED', ?, ?, ?)`
+  ).bind(
+    newUUID(),
+    actor,
+    JSON.stringify({
+      deletedRequestId: req.id,
+      studentName: req.student_name,
+      rocketNumber: req.rocket_number,
+      term: req.term,
+      sport: req.sport,
+      statusAtDeletion: req.status,
+      ...(bulk ? { bulk: true } : {}),
+    }),
+    ip,
+  ).run();
+}
+
 // DELETE /api/requests/:id — super_admin only (permanent delete)
 app.delete('/api/requests/:id', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
   if (user.role !== 'super_admin') return err('Only Super Admin can delete requests', 403);
 
   const { id } = c.req.param();
 
-  const req = await c.env.DB.prepare('SELECT id FROM insurance_requests WHERE id = ?').bind(id).first();
+  const req = await c.env.DB.prepare(
+    'SELECT id, student_name, rocket_number, term, sport, status FROM insurance_requests WHERE id = ?'
+  ).bind(id).first<Record<string, unknown>>();
   if (!req) return err('Not found', 404);
 
+  await writeDeletionTombstone(c.env, req, user.email || user.name, clientIp(c), false);
   await c.env.DB.batch([
     c.env.DB.prepare('DELETE FROM signatures WHERE request_id = ?').bind(id),
     c.env.DB.prepare('DELETE FROM audit_log WHERE request_id = ?').bind(id),
@@ -1220,7 +1519,7 @@ app.delete('/api/requests/:id', async c => {
 // ── Reports (CFO and super_admin) ────────────────────────────────────────────
 
 app.get('/api/reports', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
   if (user.role !== 'cfo' && user.role !== 'super_admin') return err('Forbidden', 403);
 
@@ -1241,16 +1540,20 @@ app.get('/api/reports', async c => {
   if (status) { query += ' AND ir.status = ?'; params.push(status); }
   if (coach) { query += ' AND (ir.coach_name LIKE ? OR ir.coach_email LIKE ?)'; params.push(`%${coach}%`, `%${coach}%`); }
 
-  query += ' ORDER BY ir.created_at DESC';
+  // The report drives on-screen aggregates, so paging it would silently change the
+  // totals. It is bounded instead, and the page warns when the bound is reached rather
+  // than presenting a truncated total as if it were complete. Use the CSV export for
+  // anything larger.
+  query += ` ORDER BY ir.created_at DESC LIMIT ${REPORT_ROW_CAP}`;
 
-  const stmt = params.reduce((s, p) => s.bind(p), c.env.DB.prepare(query));
+  const stmt = c.env.DB.prepare(query).bind(...params);
   const { results } = await stmt.all();
   return json(results);
 });
 
 // GET /api/reports/csv — CFO and super_admin, CSV download
 app.get('/api/reports/csv', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
   if (user.role !== 'cfo' && user.role !== 'super_admin') return err('Forbidden', 403);
 
@@ -1272,7 +1575,7 @@ app.get('/api/reports/csv', async c => {
 
   query += ' ORDER BY ir.created_at DESC';
 
-  const stmt = params.reduce((s, p) => s.bind(p), c.env.DB.prepare(query));
+  const stmt = c.env.DB.prepare(query).bind(...params);
   const { results } = await stmt.all<Record<string, unknown>>();
 
   const fundingLabel = (s: unknown) => (s === 'foundation_account' ? 'Foundation Account' : 'Operating Budget');
@@ -1316,7 +1619,7 @@ const isAdmin = (role: string) => role === 'cfo' || role === 'super_admin';
 
 // GET /api/admin/settings — system email + portal URL settings (Super Admin)
 app.get('/api/admin/settings', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || user.role !== 'super_admin') return err('Only Super Admin can access settings', 403);
   const settings = await getPortalSettings(c.env);
   return json(settings);
@@ -1324,42 +1627,40 @@ app.get('/api/admin/settings', async c => {
 
 // PUT /api/admin/settings — update system email + portal URL settings (Super Admin)
 app.put('/api/admin/settings', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || user.role !== 'super_admin') return err('Only Super Admin can update settings', 403);
 
-  const body = await c.req.json<{ fromName: string; fromEmail: string; appBaseUrl: string }>();
+  const body = await c.req.json<{
+    fromName: string; fromEmail: string; appBaseUrl: string; replyTo?: string;
+  }>();
   const fromName = body.fromName?.trim();
   const fromEmail = body.fromEmail?.trim().toLowerCase();
-  const appBaseUrl = body.appBaseUrl?.trim();
+  const appBaseUrl = body.appBaseUrl?.trim().replace(/\/$/, '');
+  const replyTo = body.replyTo?.trim().toLowerCase() ?? '';
 
   if (!fromName) return err('From name is required');
   if (!fromEmail || !EMAIL_SIMPLE_RE.test(fromEmail)) return err('Valid from email is required');
   if (!appBaseUrl || !isValidHttpUrl(appBaseUrl)) return err('Valid portal base URL is required (http/https)');
+  if (replyTo && !EMAIL_SIMPLE_RE.test(replyTo)) return err('Reply-to must be a valid email address');
 
-  await ensureAppSettingsTable(c.env);
+  const upsert = (key: string, value: string) => c.env.DB.prepare(
+    `INSERT INTO app_settings (setting_key, setting_value, updated_at)
+     VALUES (?, ?, datetime('now'))
+     ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = datetime('now')`
+  ).bind(key, value);
+
   await c.env.DB.batch([
-    c.env.DB.prepare(
-      `INSERT INTO app_settings (setting_key, setting_value, updated_at)
-       VALUES ('from_name', ?, datetime('now'))
-       ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = datetime('now')`
-    ).bind(fromName),
-    c.env.DB.prepare(
-      `INSERT INTO app_settings (setting_key, setting_value, updated_at)
-       VALUES ('from_email', ?, datetime('now'))
-       ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = datetime('now')`
-    ).bind(fromEmail),
-    c.env.DB.prepare(
-      `INSERT INTO app_settings (setting_key, setting_value, updated_at)
-       VALUES ('app_base_url', ?, datetime('now'))
-       ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = datetime('now')`
-    ).bind(appBaseUrl.replace(/\/$/, '')),
+    upsert('from_name', fromName),
+    upsert('from_email', fromEmail),
+    upsert('app_base_url', appBaseUrl),
+    upsert('reply_to', replyTo),
   ]);
 
-  return json({ ok: true, fromName, fromEmail, appBaseUrl: appBaseUrl.replace(/\/$/, '') });
+  return json({ ok: true, fromName, fromEmail, appBaseUrl, replyTo });
 });
 
 app.get('/api/admin/users', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
   const { results } = await c.env.DB.prepare(
     'SELECT id, email, name, role, sport_id as sportId, must_change_password as mustChangePassword, status, created_at as createdAt FROM users ORDER BY created_at DESC'
@@ -1378,7 +1679,7 @@ app.get('/api/admin/users', async c => {
 });
 
 app.post('/api/admin/users', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
 
   const { email, password, name, role, sportId, sportIds } = await c.req.json<{
@@ -1407,7 +1708,7 @@ app.post('/api/admin/users', async c => {
 
 // PUT /api/admin/users/:id/sports — update a Sport Admin's sport assignments (4.6)
 app.put('/api/admin/users/:id/sports', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
   const { id } = c.req.param();
   const { sportIds } = await c.req.json<{ sportIds: string[] }>();
@@ -1419,38 +1720,70 @@ app.put('/api/admin/users/:id/sports', async c => {
   return json({ ok: true, sportIds: [...new Set(sportIds)] });
 });
 
+// Privilege ranking, so an account cannot be removed by someone at or below its level.
+const ROLE_RANK: Record<string, number> = { coach: 1, sport_admin: 2, cfo: 3, super_admin: 4 };
+
 app.delete('/api/admin/users/:id', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
   const { id } = c.req.param();
   if (id === user.sub) return err('Cannot delete your own account', 400);
-  await c.env.DB.prepare('DELETE FROM users WHERE id = ?').bind(id).run();
+
+  const target = await c.env.DB.prepare('SELECT role FROM users WHERE id = ?')
+    .bind(id).first<{ role: string }>();
+  if (!target) return err('Not found', 404);
+
+  // isAdmin() includes cfo, so without this a CFO could delete a Super Admin.
+  if ((ROLE_RANK[target.role] ?? 0) >= (ROLE_RANK[user.role] ?? 0)) {
+    return err('You cannot delete an account at or above your own permission level', 403);
+  }
+
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM sport_admin_assignments WHERE admin_user_id = ?').bind(id),
+    c.env.DB.prepare('DELETE FROM password_reset_tokens WHERE user_id = ?').bind(id),
+    c.env.DB.prepare('DELETE FROM users WHERE id = ?').bind(id),
+  ]);
   return json({ ok: true });
 });
 
 // PUT /api/admin/users/:id/approve — approve pending user
 app.put('/api/admin/users/:id/approve', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || user.role !== 'super_admin') return err('Only Super Admin can approve users', 403);
   const { id } = c.req.param();
+  const target = await c.env.DB.prepare('SELECT email, name, status FROM users WHERE id = ?')
+    .bind(id).first<{ email: string; name: string; status: string }>();
+  if (!target) return err('Not found', 404);
+  if (target.status !== 'pending') return err('This account is not awaiting approval', 409);
+
   await c.env.DB.prepare('UPDATE users SET status = ? WHERE id = ? AND status = ?')
     .bind('active', id, 'pending').run();
+  await audit(c.env, null, 'USER_APPROVED', user.email, { userId: id, email: target.email }, clientIp(c));
+  deferNotify(c, mailEnv => notifyRegistrationDecision(mailEnv, target.email, target.name, true));
   return json({ ok: true });
 });
 
 // PUT /api/admin/users/:id/reject — reject pending user
 app.put('/api/admin/users/:id/reject', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || user.role !== 'super_admin') return err('Only Super Admin can reject users', 403);
   const { id } = c.req.param();
-  await c.env.DB.prepare('UPDATE users SET status = ? WHERE id = ? AND status = ?')
-    .bind('rejected', id, 'pending').run();
+  const target = await c.env.DB.prepare('SELECT email, name, status, token_version FROM users WHERE id = ?')
+    .bind(id).first<{ email: string; name: string; status: string; token_version: number | null }>();
+  if (!target) return err('Not found', 404);
+
+  // Bump token_version too: a previously-active account being rejected must lose any
+  // session it already holds, not just fail future logins.
+  await c.env.DB.prepare('UPDATE users SET status = ?, token_version = ? WHERE id = ?')
+    .bind('rejected', (target.token_version ?? 0) + 1, id).run();
+  await audit(c.env, null, 'USER_REJECTED', user.email, { userId: id, email: target.email }, clientIp(c));
+  deferNotify(c, mailEnv => notifyRegistrationDecision(mailEnv, target.email, target.name, false));
   return json({ ok: true });
 });
 
 // POST /api/requests/bulk-sign — bulk approve for sport admin, CFO, and super_admin
 app.post('/api/requests/bulk-sign', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
   if (user.role !== 'coach' && user.role !== 'sport_admin' && user.role !== 'cfo' && user.role !== 'super_admin') {
     return err('Only authorized roles can bulk sign', 403);
@@ -1491,7 +1824,7 @@ app.post('/api/requests/bulk-sign', async c => {
       // super_admin fills whichever required approval is still outstanding
       if (req.status !== 'PENDING_APPROVAL') continue;
       if (!signedRoles.has('CFO')) sigRole = 'CFO';
-      else if (!signedRoles.has('SPORT_ADMIN') && !isSoftball(req.sport)) sigRole = 'SPORT_ADMIN';
+      else if (!signedRoles.has('SPORT_ADMIN') && !(await isSingleApproval(c.env, req.sport))) sigRole = 'SPORT_ADMIN';
       else continue;
     }
 
@@ -1506,32 +1839,24 @@ app.post('/api/requests/bulk-sign', async c => {
       VALUES (?, ?, ?, ?, ?, ?)
     `).bind(newUUID(), id, sigRole, user.email || '', signatoryName, ip).run();
 
-    await audit(c.env, id, sigRole === 'COACH' ? 'HEAD_COACH_APPROVED' : 'SIGNED',
-      user.email || signatoryName, { role: sigRole, bulk: true }, ip);
+    const breakGlass = user.role === 'super_admin';
+    await audit(c.env, id, sigRole === 'COACH' ? 'HEAD_COACH_APPROVED' : (breakGlass ? 'SIGNED_ON_BEHALF' : 'SIGNED'),
+      user.email || signatoryName, { role: sigRole, bulk: true, ...(breakGlass ? { onBehalfOf: sigRole } : {}) }, ip);
 
     let newStatus: string;
     if (sigRole === 'COACH') {
       newStatus = 'PENDING_APPROVAL';
-      await c.env.DB.prepare('UPDATE insurance_requests SET status = ?, coach_name = ? WHERE id = ?')
+      await c.env.DB.prepare('UPDATE insurance_requests SET status = ?, coach_name = ?, reminder_count = 0 WHERE id = ?')
         .bind(newStatus, signatoryName, id).run();
-      const d = await loadRequestEmailData(c.env, id);
-      if (d) {
-        d.status = newStatus;
-        const mailEnv = await getConfiguredEnv(c.env);
-        await notifyApprovers(mailEnv, d);
-      }
+      deferRequestNotify(c, id, newStatus, notifyApprovers);
     } else {
       const allApproved = await hasAllApprovals(c.env, id, req.sport);
       newStatus = allApproved ? 'EXECUTED' : 'PENDING_APPROVAL';
       await c.env.DB.prepare('UPDATE insurance_requests SET status = ? WHERE id = ?')
         .bind(newStatus, id).run();
       if (allApproved) {
-        const d = await loadRequestEmailData(c.env, id);
-        if (d) {
-          d.status = newStatus;
-          const mailEnv = await getConfiguredEnv(c.env);
-          await notifyExecuted(mailEnv, d, await buildRequestPdfAttachment(c.env, id));
-        }
+        deferRequestNotify(c, id, newStatus, async (mailEnv, d) =>
+          notifyExecuted(mailEnv, d, await buildRequestPdfAttachment(c.env, id)));
       }
     }
 
@@ -1543,7 +1868,7 @@ app.post('/api/requests/bulk-sign', async c => {
 
 // POST /api/requests/bulk-deny — bulk decline pending requests
 app.post('/api/requests/bulk-deny', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
   if (!['coach', 'sport_admin', 'cfo', 'super_admin'].includes(user.role)) {
     return err('You are not permitted to bulk deny requests', 403);
@@ -1573,13 +1898,10 @@ app.post('/api/requests/bulk-deny', async c => {
     await audit(c.env, id, 'DENIED', user.email || user.name,
       { reason: reason.trim(), role: user.role, bulk: true }, ip);
 
-    const d = await loadRequestEmailData(c.env, id);
-    if (d) {
-      d.status = 'DENIED';
+    deferRequestNotify(c, id, 'DENIED', (mailEnv, d) => {
       d.denialReason = reason.trim();
-      const mailEnv = await getConfiguredEnv(c.env);
-      await notifyDenied(mailEnv, d);
-    }
+      return notifyDenied(mailEnv, d);
+    });
     results.push({ id, status: 'DENIED' });
   }
 
@@ -1588,7 +1910,7 @@ app.post('/api/requests/bulk-deny', async c => {
 
 // POST /api/requests/bulk-void — bulk void pending requests (CFO/Super Admin)
 app.post('/api/requests/bulk-void', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
   if (user.role !== 'cfo' && user.role !== 'super_admin') {
     return err('Only CFO or Super Admin can bulk void requests', 403);
@@ -1613,13 +1935,10 @@ app.post('/api/requests/bulk-void', async c => {
     await audit(c.env, id, 'VOIDED', user.email || user.name,
       { reason: reason.trim(), bulk: true }, ip);
 
-    const d = await loadRequestEmailData(c.env, id);
-    if (d) {
-      d.status = 'VOIDED';
+    deferRequestNotify(c, id, 'VOIDED', (mailEnv, d) => {
       d.voidReason = reason.trim();
-      const mailEnv = await getConfiguredEnv(c.env);
-      await notifyVoided(mailEnv, d, pdf);
-    }
+      return notifyVoided(mailEnv, d, pdf);
+    });
     results.push({ id, status: 'VOIDED' });
   }
 
@@ -1632,7 +1951,7 @@ const slugify = (s: string) =>
 
 // POST /api/admin/sports — create a new sport/program (Super Admin)
 app.post('/api/admin/sports', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || user.role !== 'super_admin') return err('Only Super Admin can add sports', 403);
   const { name, gender, headCoach, headCoachEmail, sportAdminId } = await c.req.json<{
     name: string; gender: string; headCoach?: string; headCoachEmail?: string; sportAdminId?: string;
@@ -1655,7 +1974,7 @@ app.post('/api/admin/sports', async c => {
 
 // PUT /api/admin/sports/:id — update sport details + admin assignment (Super Admin)
 app.put('/api/admin/sports/:id', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
   const { id } = c.req.param();
   const body = await c.req.json<{
@@ -1692,7 +2011,7 @@ app.put('/api/admin/sports/:id', async c => {
 
 // DELETE /api/admin/sports/:id — remove a sport with no requests (Super Admin)
 app.delete('/api/admin/sports/:id', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || user.role !== 'super_admin') return err('Only Super Admin can delete sports', 403);
   const { id } = c.req.param();
   const inUse = await c.env.DB.prepare('SELECT id FROM insurance_requests WHERE sport = ? LIMIT 1').bind(id).first();
@@ -1726,7 +2045,7 @@ const coachSelect = `
 // used both by the Super Admin UI and to resolve the coach's name on the request form).
 // Out-of-office delegation fields are only returned to the Super Admin who manages them.
 app.get('/api/sports/:id/coaches', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
   const { id } = c.req.param();
   const { results } = await c.env.DB.prepare(
@@ -1740,7 +2059,7 @@ app.get('/api/sports/:id/coaches', async c => {
 
 // POST /api/admin/sports/:id/coaches — add a coach to a sport (Super Admin)
 app.post('/api/admin/sports/:id/coaches', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || user.role !== 'super_admin') return err('Only Super Admin can manage coaches', 403);
   const { id: sportId } = c.req.param();
   const { displayName, email, title, isHeadCoach } = await c.req.json<{
@@ -1767,7 +2086,7 @@ app.post('/api/admin/sports/:id/coaches', async c => {
 
 // PUT /api/admin/coaches/:id — update a coach incl. head-coach flag & delegation (Super Admin)
 app.put('/api/admin/coaches/:id', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || user.role !== 'super_admin') return err('Only Super Admin can manage coaches', 403);
   const { id } = c.req.param();
   const body = await c.req.json<{
@@ -1824,7 +2143,7 @@ app.put('/api/admin/coaches/:id', async c => {
 
 // DELETE /api/admin/coaches/:id — remove a coach from a sport (Super Admin)
 app.delete('/api/admin/coaches/:id', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || user.role !== 'super_admin') return err('Only Super Admin can manage coaches', 403);
   const { id } = c.req.param();
   const coach = await c.env.DB.prepare('SELECT sport_id, is_head_coach FROM coaches WHERE id = ?').bind(id).first<{ sport_id: string; is_head_coach: number }>();
@@ -1838,7 +2157,7 @@ app.delete('/api/admin/coaches/:id', async c => {
 
 // PUT /api/admin/sports/:id/budget — set a per-sport budget cap (CFO or Super Admin)
 app.put('/api/admin/sports/:id/budget', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
   const { id } = c.req.param();
   const { budgetCap } = await c.req.json<{ budgetCap: number | null }>();
@@ -1853,7 +2172,7 @@ app.put('/api/admin/sports/:id/budget', async c => {
 
 // GET /api/reports/budget — committed premium vs. cap per sport (CFO / Super Admin)
 app.get('/api/reports/budget', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
 
   const { results } = await c.env.DB.prepare(`
@@ -1908,19 +2227,19 @@ function buildAuditQuery(c: { req: { query: () => Record<string, string> } }): {
 }
 
 app.get('/api/audit', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
   const { sql, params } = buildAuditQuery(c);
-  const stmt = params.reduce((s, p) => s.bind(p), c.env.DB.prepare(sql));
+  const stmt = c.env.DB.prepare(sql).bind(...params);
   const { results } = await stmt.all();
   return json(results);
 });
 
 app.get('/api/audit/csv', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
   const { sql, params } = buildAuditQuery(c);
-  const stmt = params.reduce((s, p) => s.bind(p), c.env.DB.prepare(sql));
+  const stmt = c.env.DB.prepare(sql).bind(...params);
   const { results } = await stmt.all<Record<string, unknown>>();
   const headers = ['Timestamp', 'Action', 'Actor', 'IP Address', 'Student', 'Rocket #', 'Sport', 'Details'];
   const csvRows = [
@@ -1948,7 +2267,7 @@ app.get('/api/audit/csv', async c => {
 
 // POST /api/requests/bulk — submit many parsed CSV rows in one call (coach)
 app.post('/api/requests/bulk', async c => {
-  const user = await getUser(c.req.raw, c.env.JWT_SECRET);
+  const user = await currentUser(c);
   if (!user) return err('Unauthorized', 401);
   if (user.role !== 'coach') return err('Only coaches can submit requests', 403);
 
@@ -1959,7 +2278,7 @@ app.post('/api/requests/bulk', async c => {
   if (rows.length > 200) return err('Too many rows (max 200 per import)');
 
   const ip = clientIp(c);
-  const created: { id: string; studentName: string; rocketNumber: string }[] = [];
+  const created: { id: string; studentName: string; rocketNumber: string; sport: string }[] = [];
   const skipped: { row: number; studentName: string; reason: string }[] = [];
   const headCoachBySport = new Map<string, { name: string; email: string } | null>();
 
@@ -1970,6 +2289,8 @@ app.post('/api/requests/bulk', async c => {
     try {
       if (!studentName) { skipped.push({ row: i + 1, studentName: studentName || '(blank)', reason: 'Missing student name' }); continue; }
       if (!validateRocketNumber(rocketNumber || '')) { skipped.push({ row: i + 1, studentName, reason: `Invalid Rocket Number: ${rocketNumber}` }); continue; }
+      const studentEmail = r.email?.trim() || null;
+      if (studentEmail && !EMAIL_SIMPLE_RE.test(studentEmail)) { skipped.push({ row: i + 1, studentName, reason: `Invalid email: ${studentEmail}` }); continue; }
       if (!r.sport) { skipped.push({ row: i + 1, studentName, reason: 'Missing sport' }); continue; }
       const sportRow = await c.env.DB.prepare('SELECT id, head_coach, head_coach_email FROM sports_programs WHERE id = ?').bind(r.sport).first<{ id: string; head_coach: string | null; head_coach_email: string | null }>();
       if (!sportRow) { skipped.push({ row: i + 1, studentName, reason: `Unknown sport: ${r.sport}` }); continue; }
@@ -1987,7 +2308,6 @@ app.post('/api/requests/bulk', async c => {
       const id = newUUID();
       const coachName = r.coachName?.trim() || sportRow.head_coach?.trim() || '';
       const coachEmail = (r.coachEmail?.trim() || sportRow.head_coach_email || '') || null;
-      const studentEmail = r.email?.trim() || null;
       await c.env.DB.prepare(`
         INSERT INTO insurance_requests
           (id, student_name, rocket_number, student_email, sport, term, premium_cost, funding_source, status, coach_email, coach_name)
@@ -1996,20 +2316,23 @@ app.post('/api/requests/bulk', async c => {
       await audit(c.env, id, 'SUBMITTED', coachName || user.name || 'Coach', { status: 'PENDING_COACH', via: 'bulk_csv' }, ip);
 
       if (!headCoachBySport.has(r.sport)) headCoachBySport.set(r.sport, await getHeadCoachForSport(c.env, r.sport));
-      const hc = headCoachBySport.get(r.sport);
-      if (hc?.email) {
-        const d = await loadRequestEmailData(c.env, id);
-        if (d) {
-          d.status = 'PENDING_COACH';
-          const mailEnv = await getConfiguredEnv(c.env);
-          await notifyPendingHeadCoach(mailEnv, d, hc.email);
-        }
-      }
-      created.push({ id, studentName, rocketNumber: rocketNumber! });
+      created.push({ id, studentName, rocketNumber: rocketNumber!, sport: r.sport });
     } catch (e) {
       skipped.push({ row: i + 1, studentName: studentName || '(row)', reason: e instanceof Error ? e.message : 'Unexpected error' });
     }
   }
+
+  // Send the same set of messages the manual path sends. The CSV path previously
+  // notified only the head coach, so a coach importing a roster got no confirmation and
+  // the athletes were never told a request had been filed on their behalf.
+  deferNotify(c, async mailEnv => {
+    for (const row of created) {
+      const d = await loadRequestEmailData(c.env, row.id);
+      if (!d) continue;
+      d.status = 'PENDING_COACH';
+      await notifyOnCreate(mailEnv, d, headCoachBySport.get(row.sport)?.email);
+    }
+  });
 
   return json({ submitted: created.length, skippedCount: skipped.length, created, skipped }, 201);
 });
@@ -2017,56 +2340,87 @@ app.post('/api/requests/bulk', async c => {
 // ── Static assets / SPA fallback ─────────────────────────────────────────────
 
 app.all('*', async c => {
+  const { pathname, origin } = new URL(c.req.url);
+
+  // An unmatched API route used to fall through to the SPA fallback and return
+  // index.html with a 200, so a client calling a mistyped endpoint got HTML where it
+  // expected JSON and failed somewhere far from the cause.
+  if (pathname.startsWith('/api/') || pathname.startsWith('/auth/')) {
+    return err('Not found', 404);
+  }
+
   const assetResponse = await c.env.ASSETS.fetch(c.req.raw);
   if (assetResponse.status === 404) {
     // SPA fallback: serve index.html for client-side routing
-    const origin = new URL(c.req.url).origin;
     return c.env.ASSETS.fetch(new Request(`${origin}/index.html`));
   }
   return assetResponse;
 });
 
-// ── Scheduled: 48h reminder emails ───────────────────────────────────────────
+// ── Scheduled: reminders and expiry ──────────────────────────────────────────
 
+const REMINDER_AFTER_HOURS = 48;
+const MAX_REMINDERS = 4;      // after this the request is left alone until it expires
+const REMINDER_BATCH = 40;    // rows per cron tick, to stay inside the subrequest budget
+const EXPIRY_BATCH = 100;
+
+/**
+ * Chase every approver who still owes a signature.
+ *
+ * This used to look only at PENDING_APPROVAL, so requests parked at PENDING_COACH were
+ * never chased. That is the step most likely to stall, because it depends on a head
+ * coach reading a message that Microsoft may have quarantined. Both steps are covered
+ * now, reminders stop after MAX_REMINDERS instead of repeating forever, and the last one
+ * escalates to the approvers above the blocked step.
+ */
 async function runReminders(env: Env): Promise<void> {
   const mailEnv = await getConfiguredEnv(env);
-  const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+  const cutoff = new Date(Date.now() - REMINDER_AFTER_HOURS * 60 * 60 * 1000).toISOString();
+  const cfoEmails = await getCfoEmails(env);
 
   const { results } = await env.DB.prepare(`
     SELECT ir.id, ir.student_name, ir.rocket_number, ir.student_email, ir.sport, sp.name as sportName,
            ir.term, ir.premium_cost, ir.funding_source, ir.status, ir.coach_email, ir.coach_name,
-           sa.email as adminEmail, sa.name as adminName,
+           ir.reminder_count, sp.single_approval as singleApproval,
+           sa.email as sportAdminEmail, sa.name as sportAdminName,
            EXISTS(SELECT 1 FROM signatures s WHERE s.request_id = ir.id AND s.signatory_role = 'SPORT_ADMIN') as sportAdminSigned,
            EXISTS(SELECT 1 FROM signatures s WHERE s.request_id = ir.id AND s.signatory_role = 'CFO') as cfoSigned
     FROM insurance_requests ir
     LEFT JOIN sports_programs sp ON ir.sport = sp.id
     LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
-    WHERE ir.status = 'PENDING_APPROVAL'
+    WHERE ir.status IN ('PENDING_COACH', 'PENDING_APPROVAL')
       AND ir.created_at < ?
-  `).bind(cutoff).all<{
+      AND ir.reminder_count < ?
+      AND NOT EXISTS (
+        SELECT 1 FROM audit_log al
+        WHERE al.request_id = ir.id AND al.action = 'REMINDER_SENT'
+          AND al.timestamp > datetime('now', '-24 hours')
+      )
+    ORDER BY ir.created_at ASC
+    LIMIT ?
+  `).bind(cutoff, MAX_REMINDERS, REMINDER_BATCH).all<{
     id: string; student_name: string; rocket_number: string; student_email: string | null;
-    sport: string; sportName: string; term: string; premium_cost: number; funding_source: string;
-    status: string; coach_email: string; coach_name: string;
-    adminEmail: string | null; adminName: string | null;
+    sport: string; sportName: string | null; term: string; premium_cost: number;
+    funding_source: string; status: string; coach_email: string; coach_name: string;
+    reminder_count: number; singleApproval: number | null;
+    sportAdminEmail: string | null; sportAdminName: string | null;
     sportAdminSigned: number; cfoSigned: number;
   }>();
 
   for (const r of results) {
-    // Check if reminder already sent in last 24h
-    const recentReminder = await env.DB.prepare(`
-      SELECT id FROM audit_log
-      WHERE request_id = ? AND action = 'REMINDER_SENT'
-        AND timestamp > datetime('now', '-24 hours')
-      LIMIT 1
-    `).bind(r.id).first();
-    if (recentReminder) continue;
+    const headCoach = await getHeadCoachForSport(env, r.sport);
+    const sportAdminEmails = await getSportAdminEmailsForSport(env, r.sport);
+    const attempt = (r.reminder_count ?? 0) + 1;
+    const escalate = attempt >= MAX_REMINDERS;
 
-    const emailData = {
+    // Carry the same deadline context the original notification had. The old payload
+    // omitted it, so reminders were less informative than the message they chased.
+    const emailData: EmailData = {
       studentName: r.student_name,
       rocketNumber: r.rocket_number,
       studentEmail: r.student_email || undefined,
       sport: r.sport,
-      sportName: r.sportName,
+      sportName: r.sportName ?? r.sport,
       term: r.term,
       premiumCost: r.premium_cost,
       fundingSource: r.funding_source || 'operating_budget',
@@ -2074,21 +2428,78 @@ async function runReminders(env: Env): Promise<void> {
       coachEmail: r.coach_email,
       requestId: r.id,
       status: r.status,
+      sportAdminName: r.sportAdminName ?? undefined,
+      sportAdminEmail: r.sportAdminEmail ?? undefined,
+      sportAdminEmails,
+      headCoachName: headCoach?.name,
+      headCoachEmail: headCoach?.email,
+      cfoEmails,
+      submissionDeadline: getSubmissionDeadline(r.term),
+      submissionDeadlineISO: getSubmissionDeadlineISO(r.term),
     };
 
-    // Remind each approver who still owes a signature. Sport-admin reminders fan out
-    // to every admin assigned to the sport (1.3), not just the legacy lookup column.
-    if (!isSoftball(r.sport) && !r.sportAdminSigned) {
-      const adminEmails = await getSportAdminEmailsForSport(env, r.sport);
-      for (const to of adminEmails) {
-        await notifyReminder(mailEnv, emailData, to, 'Sport Administrator');
+    if (r.status === 'PENDING_COACH') {
+      // Step 1 is blocked. Chase the head coach (or their active delegate), and once
+      // reminders run out, tell the approvers downstream that it never reached them.
+      if (headCoach?.email) {
+        await notifyReminder(mailEnv, emailData, headCoach.email, 'Head Coach', escalate);
+      }
+      if (escalate) {
+        for (const to of [...sportAdminEmails, ...cfoEmails]) {
+          await notifyReminder(mailEnv, emailData, to, 'Sport Administrator or CFO', true);
+        }
+      }
+    } else {
+      // Remind each approver who still owes a signature. Sport-admin reminders fan out
+      // to every admin assigned to the sport (1.3), not just the legacy lookup column.
+      if (!r.singleApproval && !r.sportAdminSigned) {
+        for (const to of sportAdminEmails) {
+          await notifyReminder(mailEnv, emailData, to, 'Sport Administrator', escalate);
+        }
+      }
+      if (!r.cfoSigned) {
+        for (const to of cfoEmails) {
+          await notifyReminder(mailEnv, emailData, to, 'CFO', escalate);
+        }
       }
     }
-    if (!r.cfoSigned) {
-      await notifyReminder(mailEnv, emailData, env.CFO_EMAIL, 'CFO');
-    }
 
-    await audit(env, r.id, 'REMINDER_SENT', 'system', { status: r.status });
+    await env.DB.prepare('UPDATE insurance_requests SET reminder_count = ? WHERE id = ?')
+      .bind(attempt, r.id).run();
+    await audit(env, r.id, 'REMINDER_SENT', 'system', { status: r.status, attempt, escalated: escalate });
+  }
+}
+
+/**
+ * Retire requests whose term deadline passed while they were still awaiting approval.
+ *
+ * EXPIRED already had a label, a badge, a dashboard filter, an analytics bucket, and an
+ * exclusion in the uq_request_student_term index, but nothing ever set it. Requests sat
+ * pending forever and the duplicate guard kept rejecting a corrected resubmission for
+ * the same athlete and term. This closes that loop.
+ */
+async function runExpiry(env: Env): Promise<void> {
+  const { results } = await env.DB.prepare(`
+    SELECT id, term FROM insurance_requests
+    WHERE status IN ('PENDING_COACH', 'PENDING_APPROVAL')
+    ORDER BY created_at ASC
+    LIMIT ?
+  `).bind(EXPIRY_BATCH).all<{ id: string; term: string }>();
+
+  const expired = results.filter(r => !isBeforeDeadline(r.term));
+  if (expired.length === 0) return;
+
+  const mailEnv = await getConfiguredEnv(env);
+  for (const r of expired) {
+    await env.DB.prepare('UPDATE insurance_requests SET status = ? WHERE id = ?')
+      .bind('EXPIRED', r.id).run();
+    await audit(env, r.id, 'EXPIRED', 'system', { term: r.term, deadline: getSubmissionDeadline(r.term) });
+
+    const d = await loadRequestEmailData(env, r.id);
+    if (d) {
+      d.status = 'EXPIRED';
+      await notifyExpired(mailEnv, d);
+    }
   }
 }
 
@@ -2097,6 +2508,8 @@ async function runReminders(env: Env): Promise<void> {
 export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext) {
+    // Expire first, so a request past its deadline is not also chased for a signature.
+    await runExpiry(env);
     await runReminders(env);
   },
 };

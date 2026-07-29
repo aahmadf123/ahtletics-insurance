@@ -7,7 +7,10 @@
   ],
   "scripts": {
     "build": "npm run build -w web",
-    "deploy": "npm run build -w web && npm run deploy -w worker"
+    "deploy": "npm run build -w web && npm run deploy -w worker",
+    "test": "npm test -w worker",
+    "typecheck": "npm run typecheck -w worker && npm run build -w web",
+    "lint": "npm run lint -w web"
   },
   "devDependencies": {
     "drizzle-kit": "^0.31.10"

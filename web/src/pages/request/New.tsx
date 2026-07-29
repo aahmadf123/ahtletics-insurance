@@ -4,18 +4,8 @@ import { useAuth } from '../../lib/auth';
 import { listSports, listSportCoaches, submitRequest, bulkImportRequests, type BulkImportRow } from '../../lib/api';
 import { PremiumDisplay } from '../../components/PremiumDisplay';
 import { DisclaimerCheckboxes } from '../../components/DisclaimerCheckboxes';
-import { TERM_OPTIONS } from '../../types';
+import { currentTermOptions } from '../../types';
 import type { SportProgram, Coach, AthleteEntry, FundingSource, RequestDetail } from '../../types';
-
-const CURRENT_YEAR = new Date().getFullYear();
-
-const TERMS = TERM_OPTIONS.map(t => ({
-  value: `${t.label} ${t.label === 'Fall' || t.label === 'Full Year' ? CURRENT_YEAR : CURRENT_YEAR + 1}`,
-  label: `${t.label} ${t.label === 'Fall' || t.label === 'Full Year' ? CURRENT_YEAR : CURRENT_YEAR + 1}`,
-  premium: t.premium,
-  termKey: t.label,
-  deadline: t.deadline,
-}));
 
 function emptyAthlete(): AthleteEntry {
   return { firstName: '', lastName: '', rocketNumber: '', email: '' };
@@ -149,9 +139,13 @@ export function NewRequest() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sport]);
 
-  const selectedTerm = TERMS.find(t => t.value === term);
-  const year = selectedTerm ? selectedTerm.value.split(' ').pop() : '';
-  const deadline = selectedTerm ? `${selectedTerm.deadline}, ${year}` : '';
+  // Resolved fresh on each render so a page left open across a deadline does not keep
+  // offering a term the server will now reject.
+  const termOptions = useMemo(() => currentTermOptions(), []);
+  const openTerms = termOptions.filter(t => t.open);
+
+  const selectedTerm = termOptions.find(t => t.value === term);
+  const deadline = selectedTerm?.deadline ?? '';
   const selectedSport = sports.find(s => s.id === sport);
   const premium = selectedTerm?.premium ?? 0;
 
@@ -362,8 +356,24 @@ export function NewRequest() {
             <label>Term *</label>
             <select value={term} onChange={e => setTerm(e.target.value)} required>
               <option value="">Select a term…</option>
-              {TERMS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+              {/* Closed terms are omitted rather than shown and rejected with a 422
+                  after the coach has filled in the whole form. */}
+              {openTerms.map(t => (
+                <option key={t.value} value={t.value}>
+                  {t.label} — submit by {t.deadline}
+                </option>
+              ))}
             </select>
+            {openTerms.length === 0 && (
+              <span className="field-error">
+                No term is currently open for submission. Contact the Athletics Business Office.
+              </span>
+            )}
+            {selectedTerm && (
+              <span className="field-hint">
+                Requests for {selectedTerm.label} must be fully approved by {selectedTerm.deadline}.
+              </span>
+            )}
           </div>
           {selectedTerm && (
             <PremiumDisplay term={term} premium={premium} athleteCount={Math.max(1, athleteCount)} fundingSource={fundingSource} />

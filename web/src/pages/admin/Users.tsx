@@ -43,7 +43,7 @@ export function AdminUsers() {
 
   useEffect(() => {
     refresh();
-  }, []);
+  }, [refresh]);
 
   if (user?.role !== 'cfo' && user?.role !== 'super_admin') {
     return <div className="page"><p className="error">Access denied. CFO or Super Admin only.</p></div>;
