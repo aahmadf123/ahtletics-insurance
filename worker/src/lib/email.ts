@@ -96,19 +96,107 @@ const FOOTER_ACCOUNT =
   'University of Toledo Athletics, Health Insurance Request System. '
   + 'You are receiving this because an account exists for this address.';
 
+// Brand tokens, matching lib/pdf.ts so a notification and the authorization PDF it links
+// to are visibly the same document. That shared letterhead is the point: a recipient who
+// has seen one recognises the other, which is worth more from a three-week-old domain
+// than any amount of styling.
+const NAVY = '#0B223F';
+const GOLD = '#FFC72C';
+const INK = '#1A1A1A';
+const MUTED = '#555555';
+const RULE = '#CED4DA';
+const FILL = '#F1F3F5';
+const CANVAS = '#EEF1F5';
+
+const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+
+/**
+ * Message chrome: navy letterhead, gold rule, white record card, quiet footer.
+ *
+ * Written for Outlook, which renders through Word and supports neither flexbox nor grid,
+ * so structure is tables and every colour is set with both a `bgcolor` attribute and CSS.
+ * Remote images are blocked by default in most clients, so the letterhead is a background
+ * colour with the logo placed on top rather than an image of a letterhead — blocked, it
+ * degrades to a navy band with alt text instead of a white gap.
+ *
+ * Restraint here is deliverability, not taste. The text/plain part, the visible URL beside
+ * the button, and the absence of attachments are what earned an SCL of 1 against Exchange
+ * Online; a heavier, image-led design would put that back at risk. See EMAIL_SETUP.md.
+ */
 function emailHtml(
   env: Env, title: string, body: string, actionLink?: string, actionLabel?: string,
   footer: string = FOOTER_REQUEST,
 ): string {
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="font-family:-apple-system,Segoe UI,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">
-<h2 style="color:#003DA5;font-size:20px">${escapeHtml(title)}</h2>
-${body}
-${actionLink ? `<p style="margin-top:20px"><a href="${actionLink}" style="background:#003DA5;color:#ffffff;padding:10px 20px;border-radius:6px;text-decoration:none;display:inline-block">${escapeHtml(actionLabel ?? 'View Request')}</a></p>
-<p style="font-size:13px;color:#555">Or open this address directly:<br/><span style="word-break:break-all">${escapeHtml(actionLink)}</span></p>` : ''}
-<hr style="margin-top:30px;border:none;border-top:1px solid #eee"/>
-<p style="color:#888;font-size:12px">${escapeHtml(footer)}<br/>
-Questions: <a href="mailto:${escapeHtml(env.REPLY_TO_EMAIL || env.CFO_EMAIL)}">${escapeHtml(env.REPLY_TO_EMAIL || env.CFO_EMAIL)}</a></p>
+  const base = env.APP_BASE_URL.replace(/\/$/, '');
+  const replyTo = env.REPLY_TO_EMAIL || env.CFO_EMAIL;
+  const cell = `font-family:${FONT};color:${INK};font-size:15px;line-height:1.6`;
+
+  return `<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<meta name="supported-color-schemes" content="light">
+<title>${escapeHtml(title)}</title>
+<style>
+  /* Progressive enhancement only — every rule below is duplicated inline for clients
+     that discard the style block entirely. */
+  a{color:${NAVY}}
+  @media (max-width:620px){
+    .shell{padding:0!important}
+    .pad{padding:24px 20px!important}
+    .band{padding:20px!important}
+  }
+</style>
+</head>
+<body style="margin:0;padding:0;background:${CANVAS};-webkit-text-size-adjust:100%" bgcolor="${CANVAS}">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${CANVAS}" style="background:${CANVAS}">
+<tr><td class="shell" align="center" style="padding:28px 12px">
+
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;border-collapse:collapse;border:1px solid ${RULE}">
+
+  <!-- Letterhead -->
+  <tr><td class="band" bgcolor="${NAVY}" style="background:${NAVY};padding:24px 32px">
+    <img src="${base}/logo-dark.png" width="168" alt="University of Toledo Athletics"
+         style="display:block;width:168px;max-width:168px;height:auto;border:0;outline:none;text-decoration:none">
+    <div style="font-family:${FONT};color:${GOLD};font-size:11px;font-weight:700;letter-spacing:1.4px;text-transform:uppercase;padding-top:14px">
+      Athletics Business Office
+    </div>
+    <div style="font-family:${FONT};color:#C6D2E2;font-size:12px;letter-spacing:.3px;padding-top:3px">
+      Student-Athlete Health Insurance
+    </div>
+  </td></tr>
+
+  <!-- Gold rule -->
+  <tr><td bgcolor="${GOLD}" height="4" style="background:${GOLD};height:4px;line-height:4px;font-size:0">&nbsp;</td></tr>
+
+  <!-- Record -->
+  <tr><td class="pad" bgcolor="#FFFFFF" style="background:#FFFFFF;padding:32px">
+    <h1 style="margin:0 0 18px;font-family:${FONT};color:${NAVY};font-size:21px;line-height:1.3;font-weight:700">${escapeHtml(title)}</h1>
+    <div style="${cell}">${body}</div>
+${actionLink ? `
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:26px 0 14px">
+      <tr><td bgcolor="${NAVY}" style="background:${NAVY};padding:13px 28px">
+        <a href="${actionLink}" style="font-family:${FONT};color:#FFFFFF;font-size:15px;font-weight:600;text-decoration:none;display:inline-block">${escapeHtml(actionLabel ?? 'View request')}</a>
+      </td></tr>
+    </table>
+    <p style="margin:0;font-family:${FONT};color:${MUTED};font-size:13px;line-height:1.55">
+      If the button does not work, open this address:<br>
+      <span style="word-break:break-all;color:${NAVY}">${escapeHtml(actionLink)}</span>
+    </p>` : ''}
+  </td></tr>
+
+  <!-- Footer -->
+  <tr><td bgcolor="${FILL}" style="background:${FILL};padding:20px 32px;border-top:1px solid ${RULE}">
+    <p style="margin:0 0 6px;font-family:${FONT};color:${MUTED};font-size:12px;line-height:1.55">${escapeHtml(footer)}</p>
+    <p style="margin:0;font-family:${FONT};color:${MUTED};font-size:12px;line-height:1.55">
+      Questions: <a href="mailto:${escapeHtml(replyTo)}" style="color:${NAVY}">${escapeHtml(replyTo)}</a>
+    </p>
+  </td></tr>
+
+</table>
+
+</td></tr></table>
 </body></html>`;
 }
 
@@ -126,18 +214,40 @@ function emailText(
   return out.join('\n');
 }
 
-function detailsTable(d: EmailData): string {
-  const row = (label: string, value: string) =>
-    `<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600;width:40%">${label}</td><td style="padding:6px 12px;border:1px solid #e9ecef">${value}</td></tr>`;
-  return `<table style="border-collapse:collapse;width:100%;margin:12px 0">
-${row('Student-Athlete', escapeHtml(d.studentName))}
-${row('Rocket Number', escapeHtml(d.rocketNumber))}
-${row('Sport', escapeHtml(d.sportName))}
-${row('Term', escapeHtml(d.term))}
-${row('Premium Cost', `<strong>$${d.premiumCost.toFixed(2)}</strong>, to be deducted from the ${escapeHtml(fundingSourceLabel(d.fundingSource))}`)}
-${row('Requesting Coach', `${escapeHtml(d.coachName)}${d.coachEmail ? ` (${escapeHtml(d.coachEmail)})` : ''}`)}
-${d.submissionDeadline ? row('Submission Deadline', escapeHtml(d.submissionDeadline)) : ''}
+/**
+ * The request as a record, styled to match the boxed data fields on the authorization
+ * PDF: a stated label above its value rather than a two-column grid, because at phone
+ * width a 40/60 split wraps the value into a column two words wide.
+ */
+/**
+ * A boxed record: each label stated above its value rather than beside it. The two-column
+ * version wrapped the value into a column two words wide on a phone, and the stacked form
+ * also matches how the fields read on the authorization PDF.
+ *
+ * `value` is trusted HTML so callers can emphasise inside a field; every caller escapes
+ * its own interpolations.
+ */
+function recordTable(pairs: [label: string, value: string][]): string {
+  const label = `font-family:${FONT};color:${MUTED};font-size:10px;font-weight:700;letter-spacing:1.1px;text-transform:uppercase;padding:10px 14px 0`;
+  const value = `font-family:${FONT};color:${INK};font-size:15px;line-height:1.45;padding:2px 14px 11px`;
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${FILL}" style="width:100%;border-collapse:collapse;background:${FILL};border:1px solid ${RULE};margin:18px 0">
+${pairs.map(([l, v]) => `<tr><td style="${label}">${escapeHtml(l)}</td></tr><tr><td style="${value}">${v}</td></tr>`).join('\n')}
 </table>`;
+}
+
+function detailsTable(d: EmailData): string {
+  const rows: [string, string][] = [
+    ['Student-Athlete', escapeHtml(d.studentName)],
+    ['Rocket Number', escapeHtml(d.rocketNumber)],
+    ['Sport', escapeHtml(d.sportName)],
+    ['Term', escapeHtml(d.term)],
+    ['Premium', `<strong style="color:${NAVY};font-size:17px">$${d.premiumCost.toFixed(2)}</strong>`
+      + `<span style="color:${MUTED};font-size:13px"> &middot; ${escapeHtml(fundingSourceLabel(d.fundingSource))}</span>`],
+    ['Requesting Coach', `${escapeHtml(d.coachName)}`
+      + (d.coachEmail ? `<span style="color:${MUTED};font-size:13px"><br>${escapeHtml(d.coachEmail)}</span>` : '')],
+  ];
+  if (d.submissionDeadline) rows.push(['Submission Deadline', escapeHtml(d.submissionDeadline)]);
+  return recordTable(rows);
 }
 
 /** The same details as detailsTable, for the text/plain part. */
@@ -516,19 +626,20 @@ export async function notifyAccountCreated(
     + `Insurance Portal as ${roleLabel}. Sign in with the details below.`;
   const closing = 'You will be asked to choose your own password the first time you sign in. '
     + 'The temporary password stops working at that point.';
-  const cell = 'padding:6px 12px;border:1px solid #e9ecef';
-  const label = 'padding:6px 12px;background:#f8f9fa;font-weight:600;width:40%';
   await sendEmail(
     env, to, subject,
     emailHtml(
       env, subject,
-      `<p>Hi ${escapeHtml(name)},</p><p>${escapeHtml(intro)}</p>`
-      + `<table style="border-collapse:collapse;width:100%;margin:12px 0">`
-      + `<tr><td style="${label}">Email</td><td style="${cell}">${escapeHtml(to)}</td></tr>`
-      + `<tr><td style="${label}">Temporary password</td>`
-      + `<td style="${cell}"><code style="font-size:15px">${escapeHtml(tempPassword)}</code></td></tr>`
-      + `</table>`
-      + `<p style="color:#666;font-size:14px">${escapeHtml(closing)}</p>`,
+      `<p style="margin:0 0 14px">Hi ${escapeHtml(name)},</p>`
+      + `<p style="margin:0">${escapeHtml(intro)}</p>`
+      + recordTable([
+        ['Email', escapeHtml(to)],
+        ['Temporary password',
+          `<code style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:16px;`
+          + `color:${NAVY};background:#FFFFFF;border:1px solid ${RULE};padding:5px 9px;display:inline-block">`
+          + `${escapeHtml(tempPassword)}</code>`],
+      ])
+      + `<p style="margin:0;color:${MUTED};font-size:13.5px;line-height:1.55">${escapeHtml(closing)}</p>`,
       link, 'Sign in', FOOTER_ACCOUNT,
     ),
     emailText(env, subject, [
