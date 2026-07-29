@@ -98,19 +98,9 @@ export interface SportAdmin {
   isCfo: number;
 }
 
-export interface TermOption {
-  label: string;
-  value: string;
-  premium: number;
-  deadline: string;
-}
-
-export const TERM_OPTIONS: TermOption[] = [
-  { label: 'Fall', value: 'Fall', premium: 898.0, deadline: 'September 8' },
-  { label: 'Spring/Summer', value: 'Spring/Summer', premium: 1394.0, deadline: 'January 26' },
-  { label: 'Summer', value: 'Summer', premium: 546.0, deadline: 'July 1' },
-  { label: 'Full Year', value: 'Full Year', premium: 2292.0, deadline: 'September 8' },
-];
+// Term premiums and deadlines come from shared/terms.ts, which the Worker uses too.
+// They were previously duplicated here and would drift the first time a rate changed.
+export { currentTermOptions, TERMS, getPremiumForTerm, type TermOption, type TermKey } from '../../shared/terms';
 
 export interface AthleteEntry {
   firstName: string;

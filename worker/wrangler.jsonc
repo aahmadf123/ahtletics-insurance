@@ -22,16 +22,30 @@
     }
   ],
   "triggers": {
+    // Hourly. Expires requests past their term deadline, then chases outstanding
+    // signatures. Both handlers process a bounded batch per tick.
     "crons": ["0 * * * *"]
   },
   "vars": {
-    "CFO_EMAIL": "firas.azfar@gmail.com",
-    // TEST MODE: Resend has no verified domain yet, so the only sender that delivers is
-    // onboarding@resend.dev, and it can ONLY reach the account owner (firas.azfar@gmail.com).
-    // Once a domain is verified at resend.com/domains, change this to e.g.
-    // noreply@<your-verified-domain> to email coaches/students/admins. See EMAIL_SETUP.md.
-    "FROM_EMAIL": "onboarding@resend.dev",
-    "APP_BASE_URL": "https://ahtletics-insurance.firas-azfar.workers.dev",
-    "DEV_MODE": "false"
+    // Everything here is a fallback. Super Admin > Settings writes to app_settings,
+    // which takes precedence at send time (see getPortalSettings). These values are
+    // what a fresh deploy uses, and what a settings-read failure falls back to, so
+    // they must be correct rather than pointing at a test sender.
+
+    // Mail goes out from a dedicated subdomain rather than the apex, so a reputation
+    // problem stays contained. The subdomain has to be verified in Resend with SPF,
+    // DKIM, and aligned DMARC before anything reaches an Exchange Online inbox.
+    // See EMAIL_SETUP.md for the exact records and how to verify them.
+    "FROM_NAME": "UToledo Athletics Business Office",
+    "FROM_EMAIL": "noreply@send.utrockets-insurance.com",
+
+    // A monitored mailbox. Mail with no working reply path scores badly with filters,
+    // and a recipient replying to a notification should reach a person.
+    "REPLY_TO_EMAIL": "athletics-insurance@send.utrockets-insurance.com",
+
+    // Fallback only: notifications resolve the CFO from active cfo accounts at send time.
+    "CFO_EMAIL": "melissa.deangelo@utoledo.edu",
+
+    "APP_BASE_URL": "https://utrockets-insurance.com"
   }
 }

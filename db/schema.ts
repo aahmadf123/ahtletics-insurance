@@ -12,7 +12,37 @@ export const users = sqliteTable("users", {
   sportId: text("sport_id"), // for coaches: their primary sport
   mustChangePassword: integer("must_change_password").notNull().default(0),
   status: text("status").notNull().default("active"), // active | pending | rejected
+  // Embedded in every JWT as `tv`; bumping it revokes all issued cookies for the user.
+  tokenVersion: integer("token_version").notNull().default(0),
+  failedLoginCount: integer("failed_login_count").notNull().default(0),
+  lockedUntil: text("locked_until"),
   createdAt: text("created_at").default(sql`CURRENT_TIMESTAMP`),
+});
+
+// ─── Password reset tokens (hashed at rest) ─────────────────────────────────
+
+export const passwordResetTokens = sqliteTable("password_reset_tokens", {
+  tokenHash: text("token_hash").primaryKey(), // SHA-256 of the token in the email link
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id),
+  expiresAt: integer("expires_at").notNull(), // unix seconds
+  used: integer("used").notNull().default(0),
+  createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
+});
+
+// ─── Email delivery log ─────────────────────────────────────────────────────
+
+export const emailLog = sqliteTable("email_log", {
+  id: text("id").primaryKey(),
+  requestId: text("request_id"), // nullable: password resets are not tied to a request
+  toEmail: text("to_email").notNull(),
+  subject: text("subject").notNull(),
+  template: text("template").notNull(),
+  providerId: text("provider_id"), // Resend message id on success
+  status: text("status").notNull(), // sent | failed | skipped
+  error: text("error"),
+  createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
 });
 
 // ─── Core Tables ────────────────────────────────────────────────────────────
@@ -32,6 +62,7 @@ export const insuranceRequests = sqliteTable("insurance_requests", {
   coachName: text("coach_name").notNull(),
   denialReason: text("denial_reason"), // set when a head coach / sport admin denies (1.4)
   parentRequestId: text("parent_request_id"), // links a resubmission to the denied original (1.5)
+  reminderCount: integer("reminder_count").notNull().default(0), // caps the reminder cron
   createdAt: text("created_at").default(sql`CURRENT_TIMESTAMP`),
 });
 
@@ -57,6 +88,9 @@ export const sportsPrograms = sqliteTable("sports_programs", {
   headCoachEmail: text("head_coach_email"),
   sportAdminId: text("sport_admin_id").references(() => sportAdministrators.id),
   budgetCap: real("budget_cap"), // optional CFO budget cap per sport (2.3)
+  // 1 = the sport's administrator is the CFO, so a single CFO signature finalizes.
+  // Replaces the hardcoded 'womens_softball' string check.
+  singleApproval: integer("single_approval").notNull().default(0),
 });
 
 // ─── Coaches (all coaching staff per sport, multi-staff model) ───────────────

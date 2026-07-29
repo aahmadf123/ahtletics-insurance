@@ -4,8 +4,22 @@ export interface JWTPayload {
   name: string;
   role: 'coach' | 'sport_admin' | 'cfo' | 'super_admin';
   sportId?: string;
+  /**
+   * Token version. Mirrors `users.token_version`; a mismatch means the account's
+   * sessions were revoked (password change/reset, rejection) since this token was
+   * issued. Absent on anonymous coach tokens, which have no user row.
+   */
+  tv?: number;
   iat: number;
   exp: number;
+}
+
+// ── Hashing helpers ───────────────────────────────────────────────────────────
+
+/** Lowercase hex SHA-256. Used to store password-reset tokens as digests. */
+export async function sha256Hex(value: string): Promise<string> {
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return [...new Uint8Array(bytes)].map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 // ── Password hashing (PBKDF2 via Web Crypto) ─────────────────────────────────
@@ -25,11 +39,24 @@ export async function hashPassword(password: string): Promise<string> {
   return `pbkdf2:${saltB64}:${hashB64}`;
 }
 
+/** Length-independent, constant-time string compare (no early exit on first diff). */
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 export async function verifyPassword(password: string, stored: string): Promise<boolean> {
   const parts = stored.split(':');
   if (parts.length !== 3 || parts[0] !== 'pbkdf2') return false;
   const [, saltB64, hashB64] = parts;
-  const salt = Uint8Array.from(atob(saltB64), c => c.charCodeAt(0));
+  let salt: Uint8Array;
+  try {
+    salt = Uint8Array.from(atob(saltB64), c => c.charCodeAt(0));
+  } catch {
+    return false; // malformed stored hash
+  }
   const enc = new TextEncoder();
   const keyMaterial = await crypto.subtle.importKey(
     'raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']
@@ -39,7 +66,7 @@ export async function verifyPassword(password: string, stored: string): Promise<
     keyMaterial, 256
   );
   const computed = btoa(String.fromCharCode(...new Uint8Array(bits)));
-  return computed === hashB64;
+  return timingSafeEqual(computed, hashB64);
 }
 
 // ── JWT (HMAC-SHA256, no library) ─────────────────────────────────────────────

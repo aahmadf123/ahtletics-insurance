@@ -190,6 +190,24 @@ code {
   text-decoration: none;
 }
 
+/* Current section, so users can tell where they are. */
+.navbar-links a.navbar-link--active {
+  color: white;
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--gold, #F5A800);
+}
+
+/* Pagination controls under a long table. */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: .85rem .25rem .25rem;
+  font-size: .85rem;
+}
+
 .navbar-user {
   display: flex;
   align-items: center;

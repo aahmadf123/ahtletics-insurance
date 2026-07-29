@@ -7,9 +7,12 @@ function escapeHtml(s: string): string {
 }
 
 export interface Env {
+  DB: D1Database;
   RESEND_API_KEY?: string;
   FROM_NAME?: string;
   FROM_EMAIL: string;
+  /** Monitored mailbox for replies. Mail with no reply path scores badly with filters. */
+  REPLY_TO_EMAIL?: string;
   APP_BASE_URL: string;
   CFO_EMAIL: string;
 }
@@ -32,6 +35,7 @@ export interface EmailData {
   sportAdminEmails?: string[]; // all admins assigned to the sport (fan-out)
   headCoachName?: string;
   headCoachEmail?: string;
+  cfoEmails?: string[]; // resolved from active CFO users, not a hardcoded env var
   voidReason?: string;
   denialReason?: string;
   submissionDeadline?: string; // human-readable deadline (PDF / display)
@@ -49,7 +53,7 @@ function fundingSourceLabel(source?: string): string {
 }
 
 function actionUrl(env: Env, requestId: string): string {
-  return `${env.APP_BASE_URL}/request/${requestId}`;
+  return `${env.APP_BASE_URL.replace(/\/$/, '')}/request/${requestId}`;
 }
 
 /** Chunked base64 encoder — avoids call-stack limits on large PDF buffers. */
@@ -62,29 +66,116 @@ export function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function emailHtml(title: string, body: string, actionLink?: string, actionLabel?: string): string {
-  return `<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px">
-<h2 style="color:#003DA5">${title}</h2>
+// ── Message construction ──────────────────────────────────────────────────────
+//
+// Deliverability notes. UToledo runs Exchange Online, which accepts a message at the
+// MX (so the provider reports success) and then quarantines it silently. Several
+// properties of the original templates read as phishing to Microsoft Defender and are
+// deliberately avoided here:
+//
+//   - HTML-only bodies. Every message now carries a matching text/plain part.
+//   - No reply path. A Reply-To pointing at a monitored mailbox is set when configured.
+//   - Bracketed urgency prefixes such as "[Action Required]" in the subject line.
+//   - A bare call-to-action button with no visible destination. The full URL is now
+//     printed next to the button so a recipient (and a filter) can see where it goes.
+//   - Calendar attachments on first contact from an unrecognised sender. The .ics is
+//     still generated but is offered as a download in the portal instead.
+//
+// The remaining half of the fix is DNS: SPF, DKIM, and strictly aligned DMARC on a
+// dedicated sending subdomain. See EMAIL_SETUP.md.
+
+const FOOTER_TEXT =
+  'University of Toledo Athletics, Health Insurance Request System. '
+  + 'You are receiving this because you are named on this insurance request.';
+
+function emailHtml(
+  env: Env, title: string, body: string, actionLink?: string, actionLabel?: string,
+): string {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="font-family:-apple-system,Segoe UI,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">
+<h2 style="color:#003DA5;font-size:20px">${escapeHtml(title)}</h2>
 ${body}
-${actionLink ? `<p><a href="${actionLink}" style="background:#003DA5;color:white;padding:10px 20px;border-radius:6px;text-decoration:none;display:inline-block;margin-top:12px">${actionLabel ?? 'View Request'}</a></p>` : ''}
+${actionLink ? `<p style="margin-top:20px"><a href="${actionLink}" style="background:#003DA5;color:#ffffff;padding:10px 20px;border-radius:6px;text-decoration:none;display:inline-block">${escapeHtml(actionLabel ?? 'View Request')}</a></p>
+<p style="font-size:13px;color:#555">Or open this address directly:<br/><span style="word-break:break-all">${escapeHtml(actionLink)}</span></p>` : ''}
 <hr style="margin-top:30px;border:none;border-top:1px solid #eee"/>
-<p style="color:#888;font-size:12px">University of Toledo Athletics — Health Insurance Request System<br/>This is an automated notification. Do not reply to this email.</p>
+<p style="color:#888;font-size:12px">${escapeHtml(FOOTER_TEXT)}<br/>
+Questions: <a href="mailto:${escapeHtml(env.REPLY_TO_EMAIL || env.CFO_EMAIL)}">${escapeHtml(env.REPLY_TO_EMAIL || env.CFO_EMAIL)}</a></p>
 </body></html>`;
 }
 
+/**
+ * Plain-text counterpart, built from the same inputs as the HTML rather than by
+ * stripping tags, so the two parts cannot drift apart.
+ */
+function emailText(env: Env, title: string, lines: string[], actionLink?: string): string {
+  const out = [title, '', ...lines];
+  if (actionLink) out.push('', `Open the request: ${actionLink}`);
+  out.push('', '---', FOOTER_TEXT, `Questions: ${env.REPLY_TO_EMAIL || env.CFO_EMAIL}`);
+  return out.join('\n');
+}
+
 function detailsTable(d: EmailData): string {
+  const row = (label: string, value: string) =>
+    `<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600;width:40%">${label}</td><td style="padding:6px 12px;border:1px solid #e9ecef">${value}</td></tr>`;
   return `<table style="border-collapse:collapse;width:100%;margin:12px 0">
-<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600;width:40%">Student-Athlete</td><td style="padding:6px 12px;border:1px solid #e9ecef">${escapeHtml(d.studentName)}</td></tr>
-<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Rocket Number</td><td style="padding:6px 12px;border:1px solid #e9ecef">${escapeHtml(d.rocketNumber)}</td></tr>
-<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Sport</td><td style="padding:6px 12px;border:1px solid #e9ecef">${escapeHtml(d.sportName)}</td></tr>
-<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Term</td><td style="padding:6px 12px;border:1px solid #e9ecef">${escapeHtml(d.term)}</td></tr>
-<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Premium Cost</td><td style="padding:6px 12px;border:1px solid #e9ecef"><strong>$${d.premiumCost.toFixed(2)}</strong> — will be deducted from ${escapeHtml(d.coachName)}'s ${escapeHtml(fundingSourceLabel(d.fundingSource))}</td></tr>
-<tr><td style="padding:6px 12px;background:#f8f9fa;font-weight:600">Requesting Coach</td><td style="padding:6px 12px;border:1px solid #e9ecef">${escapeHtml(d.coachName)}${d.coachEmail ? ` (${escapeHtml(d.coachEmail)})` : ''}</td></tr>
+${row('Student-Athlete', escapeHtml(d.studentName))}
+${row('Rocket Number', escapeHtml(d.rocketNumber))}
+${row('Sport', escapeHtml(d.sportName))}
+${row('Term', escapeHtml(d.term))}
+${row('Premium Cost', `<strong>$${d.premiumCost.toFixed(2)}</strong>, to be deducted from the ${escapeHtml(fundingSourceLabel(d.fundingSource))}`)}
+${row('Requesting Coach', `${escapeHtml(d.coachName)}${d.coachEmail ? ` (${escapeHtml(d.coachEmail)})` : ''}`)}
+${d.submissionDeadline ? row('Submission Deadline', escapeHtml(d.submissionDeadline)) : ''}
 </table>`;
 }
 
+/** The same details as detailsTable, for the text/plain part. */
+function detailsLines(d: EmailData): string[] {
+  const lines = [
+    `Student-Athlete: ${d.studentName}`,
+    `Rocket Number: ${d.rocketNumber}`,
+    `Sport: ${d.sportName}`,
+    `Term: ${d.term}`,
+    `Premium Cost: $${d.premiumCost.toFixed(2)}, to be deducted from the ${fundingSourceLabel(d.fundingSource)}`,
+    `Requesting Coach: ${d.coachName}${d.coachEmail ? ` (${d.coachEmail})` : ''}`,
+  ];
+  if (d.submissionDeadline) lines.push(`Submission Deadline: ${d.submissionDeadline}`);
+  return lines;
+}
+
+// ── Send + delivery log ───────────────────────────────────────────────────────
+
 interface SendOptions {
   attachments?: EmailAttachment[];
+  /** Correlates the log row with a request. Omitted for password resets. */
+  requestId?: string;
+  /** Template name recorded in email_log, e.g. "notifyPendingHeadCoach". */
+  template: string;
+}
+
+/**
+ * Persist one row per recipient per send.
+ *
+ * Delivery to utoledo.edu is unreliable and a 200 from the provider only means the
+ * receiving MX accepted the message. Without a durable record there is no way to answer
+ * "did the head coach get it", which is exactly the question that comes up when an
+ * approval stalls. Logging must never break a send, so failures here are swallowed.
+ */
+async function logEmail(
+  env: Env, to: string, subject: string, template: string,
+  status: 'sent' | 'failed' | 'skipped',
+  providerId?: string | null, error?: string | null, requestId?: string,
+): Promise<void> {
+  try {
+    await env.DB.prepare(
+      `INSERT INTO email_log (id, request_id, to_email, subject, template, provider_id, status, error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      crypto.randomUUID(), requestId ?? null, to, subject, template,
+      providerId ?? null, status, error ? error.slice(0, 1000) : null,
+    ).run();
+  } catch (e) {
+    console.warn(`[email] log write failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 async function sendEmail(
@@ -92,16 +183,24 @@ async function sendEmail(
   to: string | string[],
   subject: string,
   html: string,
-  opts: SendOptions = {},
+  text: string,
+  opts: SendOptions,
 ): Promise<void> {
   const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean);
   if (recipients.length === 0) return;
+
   if (!env.RESEND_API_KEY) {
     console.log(`[EMAIL SKIPPED — no RESEND_API_KEY] To: ${recipients.join(', ')} | Subject: ${subject}`);
+    for (const r of recipients) {
+      await logEmail(env, r, subject, opts.template, 'skipped', null, 'RESEND_API_KEY not configured', opts.requestId);
+    }
     return;
   }
-  // Email delivery is best-effort: a provider/config problem (e.g. an unverified sending
-  // domain) must never break the approval flow or flood the logs with stack traces.
+
+  const unsubscribe = `mailto:${env.REPLY_TO_EMAIL || env.CFO_EMAIL}?subject=unsubscribe`;
+
+  // Email delivery is best-effort: a provider or configuration problem must never break
+  // the approval flow. Every outcome is recorded in email_log either way.
   try {
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -112,17 +211,37 @@ async function sendEmail(
       body: JSON.stringify({
         from: `${(env.FROM_NAME || 'Athletics Business Office').trim()} <${env.FROM_EMAIL}>`,
         to: recipients,
+        ...(env.REPLY_TO_EMAIL ? { reply_to: env.REPLY_TO_EMAIL } : {}),
         subject,
         html,
+        text,
+        headers: {
+          'List-Unsubscribe': `<${unsubscribe}>`,
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        },
         ...(opts.attachments?.length ? { attachments: opts.attachments } : {}),
       }),
     });
+
     if (!res.ok) {
-      const err = await res.text().catch(() => res.statusText);
-      console.warn(`[email] send to ${recipients.join(', ')} returned ${res.status}: ${err}`);
+      const body = await res.text().catch(() => res.statusText);
+      console.warn(`[email] send to ${recipients.join(', ')} returned ${res.status}: ${body}`);
+      for (const r of recipients) {
+        await logEmail(env, r, subject, opts.template, 'failed', null, `${res.status}: ${body}`, opts.requestId);
+      }
+      return;
+    }
+
+    const payload = await res.json<{ id?: string }>().catch(() => ({} as { id?: string }));
+    for (const r of recipients) {
+      await logEmail(env, r, subject, opts.template, 'sent', payload.id ?? null, null, opts.requestId);
     }
   } catch (e) {
-    console.warn(`[email] send failed: ${e instanceof Error ? e.message : String(e)}`);
+    const message = e instanceof Error ? e.message : String(e);
+    console.warn(`[email] send failed: ${message}`);
+    for (const r of recipients) {
+      await logEmail(env, r, subject, opts.template, 'failed', null, message, opts.requestId);
+    }
   }
 }
 
@@ -133,18 +252,29 @@ export function allPartyRecipients(env: Env, d: EmailData): string[] {
     d.headCoachEmail,
     ...(d.sportAdminEmails ?? []),
     d.sportAdminEmail,
-    env.CFO_EMAIL,
+    ...(d.cfoEmails?.length ? d.cfoEmails : [env.CFO_EMAIL]),
   ].filter((e): e is string => !!e);
-  return [...new Set(list)];
+  return [...new Set(list.map(e => e.toLowerCase()))];
 }
 
-// ── .ics calendar reminder (3.1 Phase 2) ─────────────────────────────────────
+/** CFO recipients for a message: the resolved user list, else the env fallback. */
+function cfoRecipients(env: Env, d: EmailData): string[] {
+  return d.cfoEmails?.length ? d.cfoEmails : [env.CFO_EMAIL].filter(Boolean);
+}
+
+// ── .ics calendar reminder ────────────────────────────────────────────────────
 
 function icsEscape(s: string): string {
   return s.replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\n/g, '\\n');
 }
 
-/** Build a one-event .ics reminding the approver of the submission deadline. */
+/**
+ * Build a one-event .ics reminding the approver of the submission deadline.
+ *
+ * No longer attached to notification email. Calendar attachments from an unrecognised
+ * sender are a strong quarantine trigger in Exchange Online, and these messages are
+ * first contact from a new domain. The portal serves this as a download instead.
+ */
 export function buildApprovalIcs(env: Env, d: EmailData): EmailAttachment | null {
   // Use the deterministic ISO date (YYYY-MM-DD); avoid parsing the human-formatted string.
   if (!d.submissionDeadlineISO || !/^\d{4}-\d{2}-\d{2}$/.test(d.submissionDeadlineISO)) return null;
@@ -166,7 +296,7 @@ export function buildApprovalIcs(env: Env, d: EmailData): EmailAttachment | null
     `DTSTAMP:${stamp}`,
     `DTSTART:${start}`,
     `DTEND:${end}`,
-    `SUMMARY:${icsEscape(`Approve insurance request — ${d.studentName} (${d.sportName})`)}`,
+    `SUMMARY:${icsEscape(`Approve insurance request: ${d.studentName} (${d.sportName})`)}`,
     `DESCRIPTION:${icsEscape(`Health insurance request for ${d.studentName} (${d.term}) needs your approval. ${actionUrl(env, d.requestId)}`)}`,
     `URL:${actionUrl(env, d.requestId)}`,
     'BEGIN:VALARM',
@@ -185,103 +315,192 @@ export function buildApprovalIcs(env: Env, d: EmailData): EmailAttachment | null
 // Confirmation to the coach that their request was submitted and is pending approval.
 export async function notifyCoachSubmitted(env: Env, d: EmailData): Promise<void> {
   if (!d.coachEmail) return;
-  const subject = `Submitted: Health Insurance Request for ${d.studentName} – ${d.term}`;
-  const body = `<p>Your health insurance request has been submitted and is now pending approval by the Head Coach, Sport Administrator, and the CFO.</p>
-${detailsTable(d)}
-<p>You will receive another email once the request has been fully approved. No further action is required from you at this time.</p>`;
-  await sendEmail(env, d.coachEmail, subject, emailHtml(subject, body, actionUrl(env, d.requestId)));
+  const subject = `Insurance request submitted for ${d.studentName}, ${d.term}`;
+  const intro = 'Your health insurance request has been submitted. It is now pending approval by the head coach, the sport administrator, and the CFO.';
+  const closing = 'You will receive another message once the request is fully approved. No further action is needed from you right now.';
+  const link = actionUrl(env, d.requestId);
+  await sendEmail(
+    env, d.coachEmail, subject,
+    emailHtml(env, subject, `<p>${intro}</p>${detailsTable(d)}<p>${closing}</p>`, link),
+    emailText(env, subject, [intro, '', ...detailsLines(d), '', closing], link),
+    { template: 'notifyCoachSubmitted', requestId: d.requestId },
+  );
 }
 
 // Confirmation to the student-athlete that a request was submitted on their behalf.
 export async function notifyStudentSubmitted(env: Env, d: EmailData): Promise<void> {
   if (!d.studentEmail) return;
-  const subject = `Health Insurance Enrollment Request – ${d.term}`;
-  const body = `<p>Hi ${escapeHtml(d.studentName)},</p>
-<p>An athletic health insurance enrollment request has been submitted on your behalf by ${escapeHtml(d.coachName)} (${escapeHtml(d.sportName)}). It is now pending departmental approval.</p>
-${detailsTable(d)}
-<p>You will be notified once enrollment is complete. If you believe this was submitted in error, please contact the Athletics Business Office.</p>`;
-  await sendEmail(env, d.studentEmail, subject, emailHtml(subject, body));
+  const subject = `Your athletic health insurance enrollment request, ${d.term}`;
+  const intro = `An athletic health insurance enrollment request has been submitted on your behalf by ${d.coachName} (${d.sportName}). It is now pending departmental approval.`;
+  const closing = 'You will be notified once enrollment is complete. If you believe this was submitted in error, contact the Athletics Business Office.';
+  await sendEmail(
+    env, d.studentEmail, subject,
+    emailHtml(env, subject, `<p>Hi ${escapeHtml(d.studentName)},</p><p>${escapeHtml(intro)}</p>${detailsTable(d)}<p>${closing}</p>`),
+    emailText(env, subject, [`Hi ${d.studentName},`, '', intro, '', ...detailsLines(d), '', closing]),
+    { template: 'notifyStudentSubmitted', requestId: d.requestId },
+  );
 }
 
-// Step 1 approval request — goes to the HEAD COACH (or active delegate) only (1.1 / 1.8).
+// Step 1 approval request, to the head coach or their active delegate.
 export async function notifyPendingHeadCoach(env: Env, d: EmailData, headCoachEmail: string): Promise<void> {
   if (!headCoachEmail) return;
-  const subject = `[Action Required] Head Coach approval needed: ${d.studentName} – ${d.sportName}`;
-  const body = `<p>A health insurance request for one of your student-athletes requires your approval before it advances to the Sport Administrator and CFO.</p>
-${detailsTable(d)}
-<p>Please review and approve (or deny) this request.</p>`;
-  const ics = buildApprovalIcs(env, d);
-  await sendEmail(env, headCoachEmail, subject, emailHtml(subject, body, actionUrl(env, d.requestId), 'Review & Approve'), {
-    attachments: ics ? [ics] : undefined,
-  });
+  const subject = `Head coach approval needed: ${d.studentName}, ${d.sportName}`;
+  const intro = 'A health insurance request for one of your student-athletes needs your approval before it moves on to the sport administrator and the CFO.';
+  const closing = 'Please review the request and either approve or deny it.';
+  const link = actionUrl(env, d.requestId);
+  await sendEmail(
+    env, headCoachEmail, subject,
+    emailHtml(env, subject, `<p>${intro}</p>${detailsTable(d)}<p>${closing}</p>`, link, 'Review and approve'),
+    emailText(env, subject, [intro, '', ...detailsLines(d), '', closing], link),
+    { template: 'notifyPendingHeadCoach', requestId: d.requestId },
+  );
 }
 
 export async function notifyPendingSportAdmin(env: Env, d: EmailData, adminEmail: string | string[]): Promise<void> {
-  const subject = `[Action Required] Insurance request for ${d.studentName} needs your approval – ${d.sportName}`;
-  const body = `<p>A health insurance request requires your review and signature.</p>
-${detailsTable(d)}
-<p>Please click the button below to review and sign this request.</p>`;
-  const ics = buildApprovalIcs(env, d);
-  await sendEmail(env, adminEmail, subject, emailHtml(subject, body, actionUrl(env, d.requestId), 'Review & Sign'), {
-    attachments: ics ? [ics] : undefined,
-  });
+  const subject = `Approval needed: insurance request for ${d.studentName}, ${d.sportName}`;
+  const intro = 'A health insurance request needs your review and signature.';
+  const closing = 'Please review and sign the request in the portal.';
+  const link = actionUrl(env, d.requestId);
+  await sendEmail(
+    env, adminEmail, subject,
+    emailHtml(env, subject, `<p>${intro}</p>${detailsTable(d)}<p>${closing}</p>`, link, 'Review and sign'),
+    emailText(env, subject, [intro, '', ...detailsLines(d), '', closing], link),
+    { template: 'notifyPendingSportAdmin', requestId: d.requestId },
+  );
 }
 
 export async function notifyPendingCFO(env: Env, d: EmailData): Promise<void> {
-  const subject = `[Action Required] Final approval needed: Insurance request for ${d.studentName}`;
-  const body = `<p>A health insurance request requires your final approval.</p>
-${d.sportAdminName ? `<p>Sport Admin of record: <strong>${escapeHtml(d.sportAdminName)}</strong></p>` : ''}
-${detailsTable(d)}`;
-  const ics = buildApprovalIcs(env, d);
-  await sendEmail(env, env.CFO_EMAIL, subject, emailHtml(subject, body, actionUrl(env, d.requestId), 'Final Approval'), {
-    attachments: ics ? [ics] : undefined,
-  });
+  const subject = `Final approval needed: insurance request for ${d.studentName}`;
+  const intro = 'A health insurance request needs your final approval.';
+  const adminLine = d.sportAdminName ? `Sport administrator of record: ${d.sportAdminName}` : '';
+  const link = actionUrl(env, d.requestId);
+  await sendEmail(
+    env, cfoRecipients(env, d), subject,
+    emailHtml(env, subject,
+      `<p>${intro}</p>${adminLine ? `<p>${escapeHtml(adminLine)}</p>` : ''}${detailsTable(d)}`,
+      link, 'Final approval'),
+    emailText(env, subject, [intro, ...(adminLine ? ['', adminLine] : []), '', ...detailsLines(d)], link),
+    { template: 'notifyPendingCFO', requestId: d.requestId },
+  );
 }
 
 /** Send the same message to each party individually (robust to a single bad address). */
-async function sendToAllParties(env: Env, d: EmailData, subject: string, html: string, opts: SendOptions = {}): Promise<void> {
+async function sendToAllParties(
+  env: Env, d: EmailData, subject: string, html: string, text: string,
+  opts: SendOptions,
+): Promise<void> {
   for (const to of allPartyRecipients(env, d)) {
-    await sendEmail(env, to, subject, html, opts);
+    await sendEmail(env, to, subject, html, text, opts);
   }
 }
 
-// Final confirmation once all approvals are recorded — sent to ALL parties with the
-// signed/completed PDF attached (1.6).
+// Final confirmation once all approvals are recorded, with the signed PDF attached.
 export async function notifyExecuted(env: Env, d: EmailData, pdf?: EmailAttachment): Promise<void> {
-  const subject = `Approved: Health Insurance Request for ${d.studentName} – ${d.term}`;
-  const body = `<p>This health insurance request has been fully approved and executed. The premium will be deducted from the program's ${escapeHtml(fundingSourceLabel(d.fundingSource))}.</p>
-${detailsTable(d)}
-<p style="color:#1a7a4a;font-weight:600">✓ Enrollment is complete. The signed authorization form is attached.</p>`;
-  await sendToAllParties(env, d, subject, emailHtml(subject, body, actionUrl(env, d.requestId)), {
-    attachments: pdf ? [pdf] : undefined,
-  });
+  const subject = `Approved: insurance request for ${d.studentName}, ${d.term}`;
+  const intro = `This health insurance request is fully approved and executed. The premium will be deducted from the program's ${fundingSourceLabel(d.fundingSource)}.`;
+  const closing = 'Enrollment is complete. The signed authorization form is attached.';
+  const link = actionUrl(env, d.requestId);
+  await sendToAllParties(env, d, subject,
+    emailHtml(env, subject, `<p>${escapeHtml(intro)}</p>${detailsTable(d)}<p style="color:#1a7a4a;font-weight:600">${closing}</p>`, link),
+    emailText(env, subject, [intro, '', ...detailsLines(d), '', closing], link),
+    { template: 'notifyExecuted', requestId: d.requestId, attachments: pdf ? [pdf] : undefined },
+  );
 }
 
 export async function notifyVoided(env: Env, d: EmailData, pdf?: EmailAttachment): Promise<void> {
-  const subject = `Voided: Health Insurance Request for ${d.studentName}`;
-  const body = `<p>This health insurance request has been voided by the CFO.</p>
-${d.voidReason ? `<p><strong>Reason:</strong> ${escapeHtml(d.voidReason)}</p>` : ''}
-${detailsTable(d)}
-<p>If you believe this was in error, please contact the Athletics Business Office.</p>`;
-  await sendToAllParties(env, d, subject, emailHtml(subject, body, actionUrl(env, d.requestId)), {
-    attachments: pdf ? [pdf] : undefined,
-  });
+  const subject = `Voided: insurance request for ${d.studentName}`;
+  const intro = 'This health insurance request has been voided by the CFO.';
+  const reason = d.voidReason ? `Reason: ${d.voidReason}` : '';
+  const closing = 'If you believe this was in error, contact the Athletics Business Office.';
+  const link = actionUrl(env, d.requestId);
+  await sendToAllParties(env, d, subject,
+    emailHtml(env, subject,
+      `<p>${intro}</p>${reason ? `<p><strong>Reason:</strong> ${escapeHtml(d.voidReason!)}</p>` : ''}${detailsTable(d)}<p>${closing}</p>`, link),
+    emailText(env, subject, [intro, ...(reason ? ['', reason] : []), '', ...detailsLines(d), '', closing], link),
+    { template: 'notifyVoided', requestId: d.requestId, attachments: pdf ? [pdf] : undefined },
+  );
 }
 
-// Request denied by the head coach or a sport admin — fan out with the reason (1.4).
+// Request denied by the head coach or a sport admin, fanned out with the reason.
 export async function notifyDenied(env: Env, d: EmailData): Promise<void> {
-  const subject = `Denied: Health Insurance Request for ${d.studentName} – ${d.term}`;
-  const body = `<p>This health insurance request has been <strong>denied</strong> and will not be processed as submitted.</p>
-${d.denialReason ? `<p><strong>Reason for denial:</strong> ${escapeHtml(d.denialReason)}</p>` : ''}
-${detailsTable(d)}
-<p>The requesting coach can correct the issue and resubmit from the request page.</p>`;
-  await sendToAllParties(env, d, subject, emailHtml(subject, body, actionUrl(env, d.requestId), 'View & Resubmit'));
+  const subject = `Denied: insurance request for ${d.studentName}, ${d.term}`;
+  const intro = 'This health insurance request has been denied and will not be processed as submitted.';
+  const reason = d.denialReason ? `Reason for denial: ${d.denialReason}` : '';
+  const closing = 'The requesting coach can correct the issue and resubmit from the request page.';
+  const link = actionUrl(env, d.requestId);
+  await sendToAllParties(env, d, subject,
+    emailHtml(env, subject,
+      `<p>${intro}</p>${reason ? `<p><strong>Reason for denial:</strong> ${escapeHtml(d.denialReason!)}</p>` : ''}${detailsTable(d)}<p>${closing}</p>`,
+      link, 'View and resubmit'),
+    emailText(env, subject, [intro, ...(reason ? ['', reason] : []), '', ...detailsLines(d), '', closing], link),
+    { template: 'notifyDenied', requestId: d.requestId },
+  );
 }
 
-export async function notifyReminder(env: Env, d: EmailData, to: string, role: string): Promise<void> {
-  const subject = `Reminder: Action Required – Health Insurance Request Pending Your Signature`;
-  const body = `<p>A health insurance request assigned to you as <strong>${role}</strong> has been pending for over 48 hours and still requires your signature.</p>
-${detailsTable(d)}
-<p>Please take action at your earliest convenience to avoid the request expiring.</p>`;
-  await sendEmail(env, to, subject, emailHtml(subject, body, actionUrl(env, d.requestId), 'Review & Sign'));
+/** A request whose term deadline passed while it was still awaiting a signature. */
+export async function notifyExpired(env: Env, d: EmailData): Promise<void> {
+  const subject = `Expired: insurance request for ${d.studentName}, ${d.term}`;
+  const intro = `The submission deadline for ${d.term} has passed and this request was still awaiting approval, so it has been marked expired.`;
+  const closing = 'Contact the Athletics Business Office if this athlete still needs coverage for this term.';
+  const link = actionUrl(env, d.requestId);
+  await sendToAllParties(env, d, subject,
+    emailHtml(env, subject, `<p>${escapeHtml(intro)}</p>${detailsTable(d)}<p>${closing}</p>`, link),
+    emailText(env, subject, [intro, '', ...detailsLines(d), '', closing], link),
+    { template: 'notifyExpired', requestId: d.requestId },
+  );
+}
+
+export async function notifyReminder(
+  env: Env, d: EmailData, to: string, role: string, escalated = false,
+): Promise<void> {
+  const subject = escalated
+    ? `Still awaiting your signature: insurance request for ${d.studentName}`
+    : `Reminder: insurance request for ${d.studentName} needs your signature`;
+  const intro = escalated
+    ? `This request has been waiting on your signature as ${role} through several reminders. It will expire on ${d.submissionDeadline ?? 'the term deadline'} if it is not actioned.`
+    : `A health insurance request assigned to you as ${role} has been pending for over 48 hours and still needs your signature.`;
+  const closing = 'Please review and sign the request so it can be processed before the deadline.';
+  const link = actionUrl(env, d.requestId);
+  await sendEmail(
+    env, to, subject,
+    emailHtml(env, subject, `<p>${escapeHtml(intro)}</p>${detailsTable(d)}<p>${closing}</p>`, link, 'Review and sign'),
+    emailText(env, subject, [intro, '', ...detailsLines(d), '', closing], link),
+    { template: escalated ? 'notifyReminderEscalated' : 'notifyReminder', requestId: d.requestId },
+  );
+}
+
+// ── Account email ─────────────────────────────────────────────────────────────
+
+export async function notifyPasswordReset(
+  env: Env, to: string, name: string, token: string,
+): Promise<void> {
+  const link = `${env.APP_BASE_URL.replace(/\/$/, '')}/reset-password?token=${token}`;
+  const subject = 'Reset your Athletics Insurance Portal password';
+  const intro = 'We received a request to reset your password for the University of Toledo Athletics Insurance Portal.';
+  const closing = 'This link expires in one hour and can be used once. If you did not request a reset, you can ignore this message and your password will stay unchanged.';
+  await sendEmail(
+    env, to, subject,
+    emailHtml(env, subject, `<p>Hi ${escapeHtml(name)},</p><p>${intro}</p><p style="color:#666;font-size:14px">${closing}</p>`, link, 'Reset my password'),
+    emailText(env, subject, [`Hi ${name},`, '', intro, '', closing], link),
+    { template: 'notifyPasswordReset' },
+  );
+}
+
+/** Tells a self-registered user their account request was approved or rejected. */
+export async function notifyRegistrationDecision(
+  env: Env, to: string, name: string, approved: boolean,
+): Promise<void> {
+  const subject = approved
+    ? 'Your Athletics Insurance Portal account is active'
+    : 'Your Athletics Insurance Portal account request';
+  const intro = approved
+    ? 'Your account request has been approved. You can now sign in with the email and password you registered with.'
+    : 'Your account request was not approved. If you believe this is a mistake, contact the Athletics Business Office.';
+  const link = approved ? `${env.APP_BASE_URL.replace(/\/$/, '')}/login` : undefined;
+  await sendEmail(
+    env, to, subject,
+    emailHtml(env, subject, `<p>Hi ${escapeHtml(name)},</p><p>${escapeHtml(intro)}</p>`, link, 'Sign in'),
+    emailText(env, subject, [`Hi ${name},`, '', intro], link),
+    { template: approved ? 'notifyRegistrationApproved' : 'notifyRegistrationRejected' },
+  );
 }

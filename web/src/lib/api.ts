@@ -144,6 +144,27 @@ export function getRequestPdfUrl(id: string) {
   return `/api/requests/${id}/pdf`;
 }
 
+/** Deadline reminder as a calendar file, served here rather than emailed as an attachment. */
+export function getRequestCalendarUrl(id: string) {
+  return `/api/requests/${id}/calendar`;
+}
+
+export interface EmailLogEntry {
+  id: string;
+  toEmail: string;
+  subject: string;
+  template: string;
+  providerId: string | null;
+  status: 'sent' | 'failed' | 'skipped';
+  error: string | null;
+  createdAt: string;
+}
+
+/** Delivery log for one request. CFO and Super Admin only. */
+export function listRequestEmails(id: string) {
+  return request<EmailLogEntry[]>(`/api/requests/${id}/emails`);
+}
+
 export function voidRequest(id: string, reason: string) {
   return request<InsuranceRequest>(`/api/requests/${id}/void`, {
     method: 'POST',
@@ -270,6 +291,18 @@ export interface AdminSettings {
   fromName: string;
   fromEmail: string;
   appBaseUrl: string;
+  replyTo: string;
+}
+
+// Auth — first-run setup
+export function getAuthStatus() {
+  return request<{ setupRequired: boolean }>('/auth/status');
+}
+
+export function completeSetup(data: {
+  email: string; password: string; name: string; role: string; sportId?: string;
+}) {
+  return request<User>('/auth/setup', { method: 'POST', body: JSON.stringify(data) });
 }
 
 export function getAdminSettings() {
