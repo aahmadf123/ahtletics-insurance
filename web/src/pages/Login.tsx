@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
+import { getAuthStatus } from '../lib/api';
 
 export function Login() {
   const { selectIdentity, login } = useAuth();
@@ -11,6 +12,17 @@ export function Login() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+
+  // A database with no accounts can only be bootstrapped from /setup, and nothing else in
+  // the UI links there — registration deliberately offers Sport Administrator and CFO only,
+  // since a self-service route to Super Admin would be a privilege-escalation hole. Without
+  // this redirect a fresh deployment is a dead end: the sign-in page offers roles that
+  // cannot exist yet and "request access" needs an approver who has not been created.
+  useEffect(() => {
+    getAuthStatus()
+      .then(s => { if (s.setupRequired) navigate('/setup', { replace: true }); })
+      .catch(() => { /* offline or erroring: leave the normal sign-in form in place */ });
+  }, [navigate]);
 
   const needsCredentials = role === 'sport_admin' || role === 'cfo' || role === 'super_admin';
 
