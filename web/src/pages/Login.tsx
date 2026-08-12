@@ -119,6 +119,11 @@ export function Login() {
             ))}
           </div>
 
+        {/* A real form, so Enter in either field submits — the inputs used to sit in a
+            bare div and Enter went nowhere, forcing a mouse trip to the button. It also
+            lets password managers recognise the pair. The role cards stay outside it,
+            or their <button> elements would become accidental submitters. */}
+        <form onSubmit={e => { e.preventDefault(); handleContinue(); }}>
           {needsCredentials && (
             <div className="auth-selector" style={{ animationDelay: '0s' }}>
               <div className="field" style={{ marginBottom: '12px' }}>
@@ -130,6 +135,7 @@ export function Login() {
                   onChange={e => setEmail(e.target.value)}
                   placeholder="you@utoledo.edu"
                   autoComplete="email"
+                  autoFocus
                 />
               </div>
               <div className="field">
@@ -171,13 +177,14 @@ export function Login() {
           {error && <div className="auth-error">{error}</div>}
 
           <button
+            type="submit"
             className={`auth-submit ${canContinue ? '' : 'auth-submit--disabled'}`}
-            onClick={handleContinue}
             disabled={!canContinue || loading}
           >
             {loading ? <span className="auth-spinner" /> : null}
             {loading ? 'Entering portal…' : 'Continue to Portal'}
           </button>
+        </form>
         </div>
       </div>
     </div>
