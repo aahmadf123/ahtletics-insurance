@@ -7,7 +7,15 @@ export interface User {
   role: UserRole;
   sportId?: string; // for coaches: their assigned sport
   mustChangePassword?: number;
-  status?: string; // 'active' | 'pending' | 'rejected'
+  status?: string; // 'active' | 'pending' | 'rejected' | 'inactive'
+  /**
+   * Rides on /auth/me so the test-mode banner can render for everyone, not just admins —
+   * the coach who submits a request and hears nothing is best placed to notice.
+   */
+  mailMode?: 'live' | 'redirect' | 'suppress';
+  mailTestAddress?: string;   // privileged roles only
+  mailModeSetBy?: string;     // privileged roles only
+  mailModeLocked?: boolean;
 }
 
 export type RequestStatus =
@@ -77,6 +85,8 @@ export interface SportProgram {
   sportAdminEmail?: string;
   budgetCap?: number | null;
   staffCount?: number; // number of non-head staff coaches
+  /** Coaches with no address on file. They cannot be notified or picked on the form. */
+  coachesMissingEmail?: number;
 }
 
 export interface Coach {

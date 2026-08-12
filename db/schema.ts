@@ -121,12 +121,23 @@ export const sportAdminAssignments = sqliteTable("sport_admin_assignments", {
     .references(() => sportsPrograms.id),
 });
 
+// A write-only mirror of `users`, NOT an independent directory.
+//
+// `sportsPrograms.sportAdminId` has a foreign key here, so the table has to exist,
+// but nothing reads it: every resolver (getCfoEmails, getSportAdminEmailsForSport,
+// loadRequestEmailData, the admin picker) sources from `users` so that `status`
+// governs who receives mail. `id` is always the corresponding `users.id`, and rows
+// are kept in step by syncAdministratorMirror() in worker/src/index.ts.
+//
+// It previously held its own seeded roster, which drifted from `users` by design —
+// `isCfo` was settable independently of `users.role`, and there was no status
+// column, so a departed administrator kept being notified forever.
 export const sportAdministrators = sqliteTable("sport_administrators", {
-  id: text("id").primaryKey(),
+  id: text("id").primaryKey(), // === users.id
   name: text("name").notNull(),
   title: text("title").notNull(),
   email: text("email").notNull(),
-  isCfo: integer("is_cfo").notNull().default(0), // 1 = also the CFO
+  isCfo: integer("is_cfo").notNull().default(0), // mirrors users.role === 'cfo'
 });
 
 // ─── Audit Log ───────────────────────────────────────────────────────────────

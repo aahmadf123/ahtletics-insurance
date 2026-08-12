@@ -132,7 +132,7 @@ export function NewRequest() {
       .then(list => {
         setCoaches(list);
         // Auto-select when the resubmit data matches a registered coach.
-        const match = list.find(co => co.displayName === coachName || co.email === coachEmail);
+        const match = list.find(co => co.displayName === coachName || (!!co.email && co.email === coachEmail));
         if (match) { setCoachId(match.id); setCoachName(match.displayName); setCoachEmail(match.email); }
       })
       .catch(() => setCoaches([]));
@@ -167,7 +167,7 @@ export function NewRequest() {
   const selectCoach = (id: string) => {
     setCoachId(id);
     const picked = coaches.find(co => co.id === id);
-    if (picked) { setCoachName(picked.displayName); setCoachEmail(picked.email); }
+    if (picked) { setCoachName(picked.displayName); setCoachEmail(picked.email?.trim() ?? ''); }
     else { setCoachName(''); setCoachEmail(''); }
   };
 
@@ -187,10 +187,19 @@ export function NewRequest() {
   };
 
   // Identity is satisfied either by picking a registered coach, or — when a sport has no
-  // coaches on file yet — by typing a name + valid email as a fallback.
+  // coaches on file yet — by typing a name as a fallback. A valid email is required either
+  // way: the server rejects a submission without one, because it is where the submitting
+  // coach's own confirmation goes and what the authorization PDF records.
   const hasRegisteredCoaches = coaches.length > 0;
-  const coachIdentityValid = hasRegisteredCoaches ? !!coachId : (!!coachName.trim() && EMAIL_RE.test(coachEmail));
-  const coachEmailError = !hasRegisteredCoaches ? validateEmail(coachEmail) : '';
+  const pickedCoach = coaches.find(co => co.id === coachId);
+  // Locked only when the picked coach genuinely has an address. Every sport seeded before
+  // this fix has coach rows with a blank email; locking on `!!coachId` alone made the field
+  // permanently uneditable and empty, so requests submitted with no coach email at all.
+  const coachEmailLocked = !!pickedCoach && !!pickedCoach.email?.trim();
+  const coachNeedsEmail = !!pickedCoach && !pickedCoach.email?.trim();
+  const coachIdentityValid =
+    (hasRegisteredCoaches ? !!coachId : !!coachName.trim()) && EMAIL_RE.test(coachEmail);
+  const coachEmailError = validateEmail(coachEmail);
 
   const athleteCount = mode === 'bulk' ? csvAthletes.filter(a => !a.error).length : athletes.length;
 
@@ -292,6 +301,7 @@ export function NewRequest() {
                   {coaches.map(co => (
                     <option key={co.id} value={co.id}>
                       {co.displayName}{co.isHeadCoach ? ' (Head Coach)' : co.title ? ` (${co.title})` : ''}
+                      {co.email?.trim() ? '' : ' — email needed'}
                     </option>
                   ))}
                 </select>
@@ -310,21 +320,36 @@ export function NewRequest() {
               )}
             </div>
             <div className="field">
-              <label>Coach Email{hasRegisteredCoaches ? '' : ' *'}</label>
+              <label>Coach Email *</label>
               <input
                 type="email"
                 value={coachEmail}
                 onChange={e => setCoachEmail(e.target.value)}
                 placeholder="you@utoledo.edu"
                 maxLength={200}
-                readOnly={hasRegisteredCoaches && !!coachId}
+                readOnly={coachEmailLocked}
               />
+              {coachNeedsEmail && !coachEmailError && (
+                <span className="field-hint">
+                  We don't have an email on file for you. Enter your address — your submission
+                  confirmation goes there.
+                </span>
+              )}
               {coachEmailError && <span className="field-error">{coachEmailError}</span>}
             </div>
           </div>
-          {selectedSport?.headCoach && (
+          {selectedSport?.headCoach && selectedSport.headCoachEmail && (
             <span className="field-hint">
               Head Coach for {selectedSport.name}: {selectedSport.headCoach} — they will receive the approval request.
+            </span>
+          )}
+          {selectedSport && !selectedSport.headCoachEmail && (
+            // Without this the form claimed the head coach "will receive the approval
+            // request" while the address it needed did not exist, and step 1 went nowhere.
+            <span className="field-error">
+              No head coach with an email address is on file for {selectedSport.name}. Your request
+              will be submitted, but the approval request cannot be delivered until an
+              administrator adds one.
             </span>
           )}
         </fieldset>

@@ -77,6 +77,12 @@ function DeliveryLog({ requestId }: { requestId: string }) {
                     <span className={`badge ${e.status === 'sent' ? 'badge--executed' : 'badge--voided'}`}>
                       {e.status}
                     </span>
+                    {/* `toEmail` is always who the message was about. Under test mode it went
+                        somewhere else entirely, and that difference has to be legible or the
+                        log would imply a delivery that never happened. */}
+                    {e.redirectedTo && (
+                      <div className="field-hint">Test mode — delivered to {e.redirectedTo} instead</div>
+                    )}
                     {e.error && <div className="field-error">{e.error}</div>}
                   </td>
                 </tr>

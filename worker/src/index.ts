@@ -8,7 +8,8 @@ import {
   notifyPendingSportAdmin, notifyPendingCFO, notifyExecuted, notifyVoided, notifyReminder,
   notifyCoachSubmitted, notifyStudentSubmitted, notifyPendingHeadCoach, notifyDenied,
   notifyExpired, notifyPasswordReset, notifyRegistrationDecision, notifyAccountCreated,
-  buildApprovalIcs, bytesToBase64, type EmailData, type EmailAttachment,
+  notifyTestMessage, buildApprovalIcs, bytesToBase64, resolveMailPolicy, MAIL_MODES,
+  type EmailData, type EmailAttachment, type MailPolicy, type MailMode,
 } from './lib/email';
 import {
   validateRocketNumber, isBeforeDeadline, getPremiumForTerm, getSubmissionDeadline,
@@ -21,13 +22,18 @@ import { buildInsuranceFormPdf, type PdfFormData } from './lib/pdf';
 export interface Env {
   DB: D1Database;
   JWT_SECRET: string;
-  CFO_EMAIL: string;
+  /** Role address used when no active CFO account exists. Never a person. */
+  FALLBACK_NOTIFICATION_EMAIL: string;
   FROM_NAME?: string;
   FROM_EMAIL: string;
   /** Monitored mailbox recipients can actually reply to. Absent = no Reply-To header. */
   REPLY_TO_EMAIL?: string;
   APP_BASE_URL: string;
   RESEND_API_KEY?: string;
+  /** Set on env.preview to pin the mail mode where Settings cannot reach it. */
+  MAIL_LOCKED_MODE?: string;
+  MAIL_TEST_ADDRESS?: string;
+  MAIL_POLICY?: MailPolicy;
   ASSETS: Fetcher;
 }
 
@@ -200,7 +206,15 @@ const isSecure = (req: Request) =>
   new URL(req.url).protocol === 'https:';
 
 const DEFAULT_FROM_NAME = 'Athletics Business Office';
-type PortalSettings = { fromName: string; fromEmail: string; appBaseUrl: string; replyTo: string };
+/**
+ * The stored settings, as typed into Super Admin. These are the raw values for the form —
+ * what actually governs a send is resolveMailPolicy(), which additionally honours the env
+ * lock and the expiry. The Settings page shows both so a lock reads as intentional.
+ */
+type PortalSettings = {
+  fromName: string; fromEmail: string; appBaseUrl: string; replyTo: string;
+  mailMode: string; mailTestAddress: string; mailModeExpiresAt: string; mailModeSetBy: string;
+};
 
 async function getPortalSettings(env: Env): Promise<PortalSettings> {
   const defaults: PortalSettings = {
@@ -208,12 +222,18 @@ async function getPortalSettings(env: Env): Promise<PortalSettings> {
     fromEmail: env.FROM_EMAIL,
     appBaseUrl: env.APP_BASE_URL,
     replyTo: env.REPLY_TO_EMAIL?.trim() || '',
+    mailMode: 'live',
+    mailTestAddress: '',
+    mailModeExpiresAt: '',
+    mailModeSetBy: '',
   };
 
   try {
     const { results } = await env.DB.prepare(
       `SELECT setting_key, setting_value FROM app_settings
-       WHERE setting_key IN ('from_name', 'from_email', 'app_base_url', 'reply_to')`
+       WHERE setting_key IN ('from_name', 'from_email', 'app_base_url', 'reply_to',
+                             'mail_mode', 'mail_test_address', 'mail_mode_expires_at',
+                             'mail_mode_set_by')`
     ).all<{ setting_key: string; setting_value: string }>();
     const map = new Map(results.map(r => [r.setting_key, r.setting_value]));
     return {
@@ -221,6 +241,10 @@ async function getPortalSettings(env: Env): Promise<PortalSettings> {
       fromEmail: (map.get('from_email') || defaults.fromEmail).trim() || defaults.fromEmail,
       appBaseUrl: (map.get('app_base_url') || defaults.appBaseUrl).trim() || defaults.appBaseUrl,
       replyTo: (map.get('reply_to') || defaults.replyTo).trim(),
+      mailMode: (map.get('mail_mode') || 'live').trim(),
+      mailTestAddress: (map.get('mail_test_address') || '').trim(),
+      mailModeExpiresAt: (map.get('mail_mode_expires_at') || '').trim(),
+      mailModeSetBy: (map.get('mail_mode_set_by') || '').trim(),
     };
   } catch {
     // If settings storage is unavailable, safely fall back to env vars.
@@ -228,15 +252,24 @@ async function getPortalSettings(env: Env): Promise<PortalSettings> {
   }
 }
 
+/**
+ * Env with the operator's settings applied, plus the resolved mail policy stamped on.
+ *
+ * Stamping matters: sendEmail calls resolveMailPolicy on every send, and without this it
+ * would issue its own D1 read per message. Every notification path already routes through
+ * here, so the policy is resolved once per request rather than once per recipient.
+ */
 async function getConfiguredEnv(env: Env): Promise<Env> {
   const settings = await getPortalSettings(env);
-  return {
+  const configured: Env = {
     ...env,
     FROM_NAME: settings.fromName,
     FROM_EMAIL: settings.fromEmail,
     APP_BASE_URL: settings.appBaseUrl,
     REPLY_TO_EMAIL: settings.replyTo,
+    MAIL_POLICY: undefined,
   };
+  return { ...configured, MAIL_POLICY: await resolveMailPolicy(configured) };
 }
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -304,10 +337,71 @@ async function syncSingleApproval(env: Env, sportId: string): Promise<void> {
     UPDATE sports_programs
     SET single_approval = CASE
       WHEN sport_admin_id IS NOT NULL
-       AND sport_admin_id IN (SELECT id FROM sport_administrators WHERE is_cfo = 1)
+       AND sport_admin_id IN (SELECT id FROM users WHERE role = 'cfo' AND status = 'active')
       THEN 1 ELSE 0 END
     WHERE id = ?
   `).bind(sportId).run();
+}
+
+/** Human-readable role, for account email and audit copy. */
+function roleLabelFor(role: string): string {
+  return role === 'super_admin' ? 'a Super Admin'
+    : role === 'cfo' ? 'the Chief Financial Officer'
+    : role === 'sport_admin' ? 'a Sport Administrator'
+    : 'a Coach';
+}
+
+/**
+ * Keep the sport_administrators mirror in step with a users row.
+ *
+ * That table is no longer a roster — nothing reads it. It survives only because
+ * sports_programs.sport_admin_id has a foreign key into it, so a row must exist for any
+ * account a sport can be assigned to. `id` is always the users.id, which is what lets the
+ * designated-administrator joins resolve through `users` and honour `status`.
+ *
+ * Demotion and deletion are handled here too: a person who is no longer an administrator
+ * must not stay assignable, and the sports pointing at them have to be detached before the
+ * row goes or the foreign key fails.
+ */
+async function syncAdministratorMirror(env: Env, userId: string): Promise<void> {
+  const u = await env.DB.prepare(
+    'SELECT name, email, role FROM users WHERE id = ?'
+  ).bind(userId).first<{ name: string; email: string; role: string }>();
+
+  if (!u || (u.role !== 'sport_admin' && u.role !== 'cfo')) {
+    const { results } = await env.DB.prepare(
+      'SELECT id FROM sports_programs WHERE sport_admin_id = ?'
+    ).bind(userId).all<{ id: string }>();
+    await env.DB.batch([
+      env.DB.prepare('UPDATE sports_programs SET sport_admin_id = NULL WHERE sport_admin_id = ?').bind(userId),
+      env.DB.prepare('DELETE FROM sport_administrators WHERE id = ?').bind(userId),
+    ]);
+    for (const s of results) await syncSingleApproval(env, s.id);
+    return;
+  }
+
+  await env.DB.prepare(`
+    INSERT INTO sport_administrators (id, name, title, email, is_cfo) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name, title = excluded.title,
+      email = excluded.email, is_cfo = excluded.is_cfo
+  `).bind(
+    userId, u.name,
+    u.role === 'cfo' ? 'Chief Financial Officer' : 'Sport Administrator',
+    u.email, u.role === 'cfo' ? 1 : 0,
+  ).run();
+}
+
+/**
+ * Recompute single_approval for every sport this account is the designated administrator
+ * of. Needed whenever their role or status changes: a deactivated or demoted CFO must stop
+ * being able to finalize a request on one signature.
+ */
+async function resyncSportsForAdministrator(env: Env, userId: string): Promise<void> {
+  const { results } = await env.DB.prepare(
+    'SELECT id FROM sports_programs WHERE sport_admin_id = ?'
+  ).bind(userId).all<{ id: string }>();
+  for (const s of results) await syncSingleApproval(env, s.id);
 }
 
 const clientIp = (c: { req: { header: (k: string) => string | undefined } }) =>
@@ -333,18 +427,23 @@ async function hasAllApprovals(env: Env, id: string, sport: string): Promise<boo
   return roles.has('SPORT_ADMIN') && roles.has('CFO');
 }
 
-/** Every active CFO account's email, so notifications are not pinned to an env var. */
+/**
+ * Every active CFO account's email.
+ *
+ * This used to UNION `sport_administrators WHERE is_cfo = 1`, which had no status column
+ * and was seeded with a real person — so the seeded CFO received every notification for
+ * every request forever, regardless of whether a genuine CFO account existed, and there
+ * was no way to stop it from inside the product. `users.status` is the whole point.
+ */
 async function getCfoEmails(env: Env): Promise<string[]> {
   try {
     const { results } = await env.DB.prepare(
-      `SELECT email FROM users WHERE role = 'cfo' AND status = 'active'
-       UNION
-       SELECT email FROM sport_administrators WHERE is_cfo = 1`
+      `SELECT email FROM users WHERE role = 'cfo' AND status = 'active'`
     ).all<{ email: string }>();
     const list = [...new Set(results.map(r => r.email).filter(Boolean))];
-    return list.length ? list : [env.CFO_EMAIL].filter(Boolean);
+    return list.length ? list : [env.FALLBACK_NOTIFICATION_EMAIL].filter(Boolean);
   } catch {
-    return [env.CFO_EMAIL].filter(Boolean);
+    return [env.FALLBACK_NOTIFICATION_EMAIL].filter(Boolean);
   }
 }
 
@@ -377,10 +476,10 @@ async function getHeadCoachForSport(
     delegated_approver_email: string | null; delegation_expires_at: string | null;
   }>();
   if (hc) {
-    if (hc.delegated_approver_email && isDelegationActive(hc.delegation_expires_at)) {
+    if (hc.delegated_approver_email?.trim() && isDelegationActive(hc.delegation_expires_at)) {
       return { name: hc.display_name, email: hc.delegated_approver_email };
     }
-    if (hc.email) return { name: hc.display_name, email: hc.email };
+    if (hc.email?.trim()) return { name: hc.display_name, email: hc.email };
   }
   const sp = await env.DB.prepare(
     'SELECT head_coach, head_coach_email FROM sports_programs WHERE id = ?'
@@ -390,15 +489,19 @@ async function getHeadCoachForSport(
 }
 
 /**
- * Every sport-admin email that should be notified for a sport: the legacy
- * sport_administrators lookup PLUS every sport_admin user assigned via
- * sport_admin_assignments (1.3, fan-out — not a single column).
+ * Every sport-admin email that should be notified for a sport: the sport's designated
+ * administrator, PLUS every sport_admin user assigned via sport_admin_assignments
+ * (1.3, fan-out — not a single column).
+ *
+ * Both legs now resolve through `users` and both filter on status. The designated-admin
+ * leg previously joined `sport_administrators`, which had no status column, so an
+ * administrator who had left kept receiving student-athlete notifications indefinitely.
  */
 async function getSportAdminEmailsForSport(env: Env, sportId: string): Promise<string[]> {
   const { results } = await env.DB.prepare(`
-    SELECT sa.email AS email
-    FROM sports_programs sp JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
-    WHERE sp.id = ?
+    SELECT u.email AS email
+    FROM sports_programs sp JOIN users u ON sp.sport_admin_id = u.id
+    WHERE sp.id = ? AND u.status = 'active'
     UNION
     SELECT u.email AS email
     FROM sport_admin_assignments saa JOIN users u ON saa.admin_user_id = u.id
@@ -444,7 +547,7 @@ async function loadRequestEmailData(env: Env, id: string): Promise<EmailData | n
            sa.email as sportAdminEmail, sa.name as sportAdminName
     FROM insurance_requests ir
     LEFT JOIN sports_programs sp ON ir.sport = sp.id
-    LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
+    LEFT JOIN users sa ON sp.sport_admin_id = sa.id AND sa.status = 'active'
     WHERE ir.id = ?
   `).bind(id).first<Record<string, unknown>>();
   if (!r) return null;
@@ -592,7 +695,38 @@ function deferRequestNotify(
 async function notifyOnCreate(env: Env, d: EmailData, headCoachEmail?: string): Promise<void> {
   await notifyCoachSubmitted(env, d);
   await notifyStudentSubmitted(env, d);
-  if (headCoachEmail) await notifyPendingHeadCoach(env, d, headCoachEmail);
+  if (headCoachEmail) {
+    await notifyPendingHeadCoach(env, d, headCoachEmail);
+  } else {
+    await recordUnroutableHeadCoach(env, d);
+  }
+}
+
+/**
+ * Record that step 1 could not be routed.
+ *
+ * This branch used to be a bare `if (headCoachEmail)` with no else, which made the most
+ * consequential failure in the system completely silent: with no address on file the
+ * approval request was never sent, the request sat at PENDING_COACH, and the first anyone
+ * heard was the fourth reminder escalating to the sport administrators and the CFO. Writing
+ * a failed row puts it in the Notification Delivery panel the CFO already reads.
+ */
+async function recordUnroutableHeadCoach(env: Env, d: EmailData): Promise<void> {
+  try {
+    await env.DB.prepare(
+      `INSERT INTO email_log (id, request_id, to_email, subject, template, status, error)
+       VALUES (?, ?, ?, ?, ?, 'failed', ?)`
+    ).bind(
+      newUUID(), d.requestId,
+      `head coach of ${d.sportName} (no address on file)`,
+      `Head coach approval needed: ${d.studentName}, ${d.sportName}`,
+      'notifyPendingHeadCoach',
+      'No head coach email on file for this sport — add one in Sports & Coaches, then resend',
+    ).run();
+    await audit(env, d.requestId, 'HEAD_COACH_UNROUTABLE', 'system', { sport: d.sport });
+  } catch (e) {
+    console.warn(`[notify] could not record unroutable head coach: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /** After the head coach approves: ask the Sport Admin(s) and CFO to act (Step 2). */
@@ -855,9 +989,19 @@ app.get('/auth/me', async c => {
     mustChangePassword = row?.must_change_password ?? 0;
   }
 
+  // The mail mode rides along so every signed-in user can see the banner, not just admins.
+  // A coach who submits a request and hears nothing back is the person best placed to
+  // notice that notifications are switched off.
+  const policy = await resolveMailPolicy(c.env);
+  const privileged = user.role === 'super_admin' || user.role === 'cfo';
+
   return json({
     id: user.sub, email: user.email, name: user.name, role: user.role,
     sportId: user.sportId, mustChangePassword,
+    mailMode: policy.mode,
+    mailTestAddress: privileged ? policy.testAddress : '',
+    mailModeSetBy: privileged ? (await getPortalSettings(c.env)).mailModeSetBy : '',
+    mailModeLocked: policy.locked,
   });
 });
 
@@ -932,9 +1076,14 @@ app.get('/api/sports', async c => {
            sp.head_coach_email as headCoachEmail, sp.budget_cap as budgetCap,
            sp.sport_admin_id as sportAdminId,
            sa.name as sportAdminName, sa.email as sportAdminEmail,
-           (SELECT COUNT(*) FROM coaches co WHERE co.sport_id = sp.id AND co.is_head_coach = 0) as staffCount
+           (SELECT COUNT(*) FROM coaches co WHERE co.sport_id = sp.id AND co.is_head_coach = 0) as staffCount,
+           -- Coaches with no address cannot be notified and cannot be picked on the
+           -- request form. Counted here so the Sports page can prompt without a
+           -- second round-trip per sport.
+           (SELECT COUNT(*) FROM coaches co WHERE co.sport_id = sp.id
+              AND TRIM(COALESCE(co.email, '')) = '') as coachesMissingEmail
     FROM sports_programs sp
-    LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
+    LEFT JOIN users sa ON sp.sport_admin_id = sa.id AND sa.status = 'active'
     ORDER BY sp.name
   `).all();
   return json(results);
@@ -944,15 +1093,18 @@ app.get('/api/sports', async c => {
 app.get('/api/admin/sport-admins', async c => {
   const user = await currentUser(c);
   if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
-  // Rows mirrored from a user account share that account's id, so they can be joined back
-  // and suppressed once the account is deactivated or rejected. The original seeded
-  // administrators have no matching user row and are always listed.
+  // Administrators are accounts, not a separate directory. Title and CFO status are derived
+  // from `role` rather than stored, so they cannot drift from it — the previous is_cfo
+  // column was independently settable and had no status, which is how a departed CFO kept
+  // conferring single-signature authority. Response shape is unchanged so the Sports page
+  // and web/src/types.ts need no edits.
   const { results } = await c.env.DB.prepare(`
-    SELECT sa.id, sa.name, sa.title, sa.email, sa.is_cfo as isCfo
-    FROM sport_administrators sa
-    LEFT JOIN users u ON u.id = sa.id
-    WHERE u.id IS NULL OR u.status = 'active'
-    ORDER BY sa.name
+    SELECT u.id, u.name, u.email,
+           CASE WHEN u.role = 'cfo' THEN 'Chief Financial Officer' ELSE 'Sport Administrator' END AS title,
+           CASE WHEN u.role = 'cfo' THEN 1 ELSE 0 END AS isCfo
+    FROM users u
+    WHERE u.role IN ('sport_admin', 'cfo') AND u.status = 'active'
+    ORDER BY u.name
   `).all();
   return json(results);
 });
@@ -981,7 +1133,7 @@ app.get('/api/requests', async c => {
            EXISTS(SELECT 1 FROM signatures s WHERE s.request_id = ir.id AND s.signatory_role = 'CFO') as cfoSigned
     FROM insurance_requests ir
     LEFT JOIN sports_programs sp ON ir.sport = sp.id
-    LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
+    LEFT JOIN users sa ON sp.sport_admin_id = sa.id AND sa.status = 'active'
     WHERE 1=1
   `;
   const params: (string | number)[] = [];
@@ -1052,7 +1204,14 @@ app.post('/api/requests', async c => {
   // The submitting coach's identity is resolved from the registered coaches table on
   // the form (1.2); fall back to the sport's head coach when not provided.
   const coachEmail = (body.coachEmail?.trim() || sportRow.head_coach_email || '') || null;
-  if (coachEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(coachEmail)) {
+  // Required, not optional. Migration 0006 backfilled the coaches table with empty emails,
+  // and the form let a coach pick their name and submit with nothing here — so coach_email
+  // landed NULL, notifyCoachSubmitted returned early, and the person who filed the request
+  // heard nothing. Rejecting before the batch below keeps the insert all-or-nothing.
+  if (!coachEmail) {
+    return err('A coach email is required so you receive your submission confirmation.');
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(coachEmail)) {
     return err('Invalid coach email');
   }
   const coachName = body.coachName?.trim() || sportRow.head_coach?.trim() || '';
@@ -1168,7 +1327,7 @@ app.get('/api/requests/:id', async c => {
            EXISTS(SELECT 1 FROM signatures s WHERE s.request_id = ir.id AND s.signatory_role = 'CFO') as cfoSigned
     FROM insurance_requests ir
     LEFT JOIN sports_programs sp ON ir.sport = sp.id
-    LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
+    LEFT JOIN users sa ON sp.sport_admin_id = sa.id AND sa.status = 'active'
     WHERE ir.id = ?
   `).bind(id).first<Record<string, unknown>>();
 
@@ -1354,7 +1513,7 @@ app.get('/api/requests/:id/emails', async c => {
   const { id } = c.req.param();
   const { results } = await c.env.DB.prepare(`
     SELECT id, to_email as toEmail, subject, template, provider_id as providerId,
-           status, error, created_at as createdAt
+           status, error, redirected_to as redirectedTo, created_at as createdAt
     FROM email_log WHERE request_id = ? ORDER BY created_at DESC LIMIT 200
   `).bind(id).all();
   return json(results);
@@ -1673,11 +1832,63 @@ function csvEscape(value: string): string {
 const isAdmin = (role: string) => role === 'cfo' || role === 'super_admin';
 
 // GET /api/admin/settings — system email + portal URL settings (Super Admin)
+/**
+ * GET /api/admin/onboarding — what still has to be configured before the portal works.
+ *
+ * A fresh deploy has 16 sports and nobody attached to any of them, because people are no
+ * longer seeded. Without this the app is reachable but inert and nothing says why: requests
+ * would submit and then sit, unrouted, because no sport has an administrator and no sport
+ * has a head coach with an address.
+ */
+app.get('/api/admin/onboarding', async c => {
+  const user = await currentUser(c);
+  if (!user || user.role !== 'super_admin') return err('Only Super Admin can view onboarding', 403);
+
+  const settings = await getPortalSettings(c.env);
+  const counts = await c.env.DB.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM users WHERE role = 'cfo' AND status = 'active') AS cfoCount,
+       (SELECT COUNT(*) FROM users WHERE role = 'sport_admin' AND status = 'active') AS sportAdminCount`
+  ).first<{ cfoCount: number; sportAdminCount: number }>();
+
+  const { results: withoutAdmin } = await c.env.DB.prepare(
+    'SELECT id, name FROM sports_programs WHERE sport_admin_id IS NULL ORDER BY name'
+  ).all<{ id: string; name: string }>();
+
+  // "Has a head coach" means a routable one — a row with a real address. A coach with a
+  // blank email is exactly the state that made step 1 silently unroutable.
+  const { results: withoutHeadCoach } = await c.env.DB.prepare(
+    `SELECT sp.id, sp.name FROM sports_programs sp
+     WHERE NOT EXISTS (
+       SELECT 1 FROM coaches co
+       WHERE co.sport_id = sp.id AND co.is_head_coach = 1 AND TRIM(COALESCE(co.email, '')) <> ''
+     )
+     ORDER BY sp.name`
+  ).all<{ id: string; name: string }>();
+
+  const settingsConfigured = !!settings.fromEmail && !!settings.appBaseUrl;
+  return json({
+    settingsConfigured,
+    cfoCount: counts?.cfoCount ?? 0,
+    sportAdminCount: counts?.sportAdminCount ?? 0,
+    sportsWithoutAdmin: withoutAdmin,
+    sportsWithoutHeadCoach: withoutHeadCoach,
+    mailMode: (await resolveMailPolicy(c.env)).mode,
+    complete: settingsConfigured
+      && (counts?.cfoCount ?? 0) > 0
+      && withoutAdmin.length === 0
+      && withoutHeadCoach.length === 0,
+  });
+});
+
 app.get('/api/admin/settings', async c => {
   const user = await currentUser(c);
   if (!user || user.role !== 'super_admin') return err('Only Super Admin can access settings', 403);
   const settings = await getPortalSettings(c.env);
-  return json(settings);
+  // Stored vs effective, so a preview lock or a lapsed expiry reads as deliberate rather
+  // than as the page failing to save.
+  const policy = await resolveMailPolicy(c.env);
+  return json({ ...settings, effective: policy });
 });
 
 // PUT /api/admin/settings — update system email + portal URL settings (Super Admin)
@@ -1687,6 +1898,7 @@ app.put('/api/admin/settings', async c => {
 
   const body = await c.req.json<{
     fromName: string; fromEmail: string; appBaseUrl: string; replyTo?: string;
+    mailMode?: string; mailTestAddress?: string; mailModeExpiresAt?: string;
   }>();
   const fromName = body.fromName?.trim();
   const fromEmail = body.fromEmail?.trim().toLowerCase();
@@ -1697,6 +1909,32 @@ app.put('/api/admin/settings', async c => {
   if (!fromEmail || !EMAIL_SIMPLE_RE.test(fromEmail)) return err('Valid from email is required');
   if (!appBaseUrl || !isValidHttpUrl(appBaseUrl)) return err('Valid portal base URL is required (http/https)');
   if (replyTo && !EMAIL_SIMPLE_RE.test(replyTo)) return err('Reply-to must be a valid email address');
+
+  const previous = await getPortalSettings(c.env);
+  const mailMode = (body.mailMode ?? previous.mailMode).trim();
+  const mailTestAddress = (body.mailTestAddress ?? previous.mailTestAddress).trim().toLowerCase();
+  let mailModeExpiresAt = (body.mailModeExpiresAt ?? previous.mailModeExpiresAt).trim();
+
+  if (!MAIL_MODES.includes(mailMode as MailMode)) {
+    return err(`Mail mode must be one of ${MAIL_MODES.join(', ')}`);
+  }
+  // Refuse to store a redirect that cannot be delivered. resolveMailPolicy would coerce it
+  // to suppress anyway, and saving a value that silently means something else is worse than
+  // refusing it here.
+  if (mailMode === 'redirect' && !EMAIL_SIMPLE_RE.test(mailTestAddress)) {
+    return err('Redirect mode needs a valid test address to send to');
+  }
+  if (mailModeExpiresAt) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(mailModeExpiresAt)) mailModeExpiresAt = `${mailModeExpiresAt}T23:59:59.999Z`;
+    if (Number.isNaN(Date.parse(mailModeExpiresAt))) return err('Test mode expiry is not a valid date');
+  }
+  if (mailMode === 'live') mailModeExpiresAt = '';   // nothing to expire back to
+
+  // A var-locked environment must not accept a value that will never take effect.
+  const locked = (c.env.MAIL_LOCKED_MODE ?? '').trim();
+  if (MAIL_MODES.includes(locked as MailMode) && mailMode !== locked) {
+    return err(`Mail mode is locked to "${locked}" for this environment and cannot be changed here`, 409);
+  }
 
   const upsert = (key: string, value: string) => c.env.DB.prepare(
     `INSERT INTO app_settings (setting_key, setting_value, updated_at)
@@ -1709,9 +1947,39 @@ app.put('/api/admin/settings', async c => {
     upsert('from_email', fromEmail),
     upsert('app_base_url', appBaseUrl),
     upsert('reply_to', replyTo),
+    upsert('mail_mode', mailMode),
+    upsert('mail_test_address', mailTestAddress),
+    upsert('mail_mode_expires_at', mailModeExpiresAt),
+    upsert('mail_mode_set_by', mailMode === 'live' ? '' : user.email),
   ]);
 
-  return json({ ok: true, fromName, fromEmail, appBaseUrl, replyTo });
+  // This is the one control whose history you will want when a message did not arrive.
+  if (mailMode !== previous.mailMode) {
+    await audit(c.env, null, 'MAIL_MODE_CHANGED', user.email, {
+      from: previous.mailMode, to: mailMode, testAddress: mailTestAddress, expiresAt: mailModeExpiresAt,
+    }, clientIp(c));
+  }
+
+  return json({
+    ok: true, fromName, fromEmail, appBaseUrl, replyTo,
+    mailMode, mailTestAddress, mailModeExpiresAt,
+    effective: await resolveMailPolicy(c.env),
+  });
+});
+
+// POST /api/admin/settings/test-email — prove the configuration end to end (Super Admin).
+// Deliberately routed through the same sendEmail path, so it exercises the mode itself
+// rather than testing a code path nothing else uses.
+app.post('/api/admin/settings/test-email', async c => {
+  const user = await currentUser(c);
+  if (!user || user.role !== 'super_admin') return err('Only Super Admin can send a test email', 403);
+  const { to } = await c.req.json<{ to?: string }>().catch(() => ({ to: '' }));
+  const address = to?.trim().toLowerCase() || user.email;
+  if (!EMAIL_SIMPLE_RE.test(address)) return err('A valid address is required');
+
+  deferNotify(c, mailEnv => notifyTestMessage(mailEnv, address, user.email));
+  const policy = await resolveMailPolicy(c.env);
+  return json({ ok: true, to: address, effective: policy });
 });
 
 app.get('/api/admin/users', async c => {
@@ -1758,44 +2026,201 @@ app.post('/api/admin/users', async c => {
 
   if (role === 'sport_admin') await setSportAdminAssignments(c.env, id, sportIds ?? []);
 
-  // Mirror the account into sport_administrators.
-  //
-  // Two parallel models exist: sports_programs.sport_admin_id references this table,
-  // while login accounts live in users and reach sports through sport_admin_assignments.
-  // The Sports page picker reads sport_administrators, so without a row here a newly
-  // created administrator cannot be assigned to a sport at all. Reusing the user's id as
-  // the primary key keeps the two sides joinable, which is what lets the picker filter on
-  // account status and lets deletion clean up both.
-  if (role === 'sport_admin' || role === 'cfo') {
-    // A seeded administrator may already exist for this person under a slug id that sports
-    // already reference. Giving them a login must not add a second entry to the picker, so
-    // the existing row is left as the canonical one. Re-pointing it at the new id would
-    // mean rewriting every sports_programs.sport_admin_id that references it, which is the
-    // riskier half of the trade for no visible gain.
-    const existing = await c.env.DB.prepare(
-      'SELECT id FROM sport_administrators WHERE lower(email) = ?'
-    ).bind(email.toLowerCase()).first<{ id: string }>();
-
-    if (!existing) {
-      await c.env.DB.prepare(
-        'INSERT INTO sport_administrators (id, name, title, email, is_cfo) VALUES (?, ?, ?, ?, ?)'
-      ).bind(
-        id, name,
-        role === 'cfo' ? 'Chief Financial Officer' : 'Sport Administrator',
-        email.toLowerCase(), role === 'cfo' ? 1 : 0,
-      ).run();
-    }
-  }
+  await syncAdministratorMirror(c.env, id);
 
   // Best-effort: the account exists whether or not the message lands, and the outcome is
   // recorded in email_log either way.
-  const roleLabel = role === 'super_admin' ? 'a Super Admin'
-    : role === 'cfo' ? 'the Chief Financial Officer'
-    : role === 'sport_admin' ? 'a Sport Administrator'
-    : 'a Coach';
-  deferNotify(c, mailEnv => notifyAccountCreated(mailEnv, email.toLowerCase(), name, password, roleLabel));
+  deferNotify(c, mailEnv => notifyAccountCreated(mailEnv, email.toLowerCase(), name, password, roleLabelFor(role)));
 
   return json({ id, email: email.toLowerCase(), name, role, sportId: sportId ?? null, sportIds: role === 'sport_admin' ? (sportIds ?? []) : [], mustChangePassword: 1, status: 'active', createdAt: new Date().toISOString() }, 201);
+});
+
+// Privilege ranking, so an account cannot be altered by someone at or below its level.
+const ROLE_RANK_ORDER: Record<string, number> = { coach: 1, sport_admin: 2, cfo: 3, super_admin: 4 };
+
+/** Reject the change unless the caller outranks both the target and the role being granted. */
+function rankGuard(callerRole: string, targetRole: string, nextRole = targetRole): string | null {
+  const caller = ROLE_RANK_ORDER[callerRole] ?? 0;
+  if ((ROLE_RANK_ORDER[targetRole] ?? 0) >= caller) {
+    return 'You cannot change an account at or above your own permission level';
+  }
+  if ((ROLE_RANK_ORDER[nextRole] ?? 0) >= caller) {
+    return 'You cannot grant a role at or above your own permission level';
+  }
+  return null;
+}
+
+/** True when this is the only active Super Admin, who must never be locked out. */
+async function isLastActiveSuperAdmin(env: Env, id: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM users WHERE role = 'super_admin' AND status = 'active' AND id <> ?`
+  ).bind(id).first<{ n: number }>();
+  return (row?.n ?? 0) === 0;
+}
+
+/**
+ * PUT /api/admin/users/:id — edit an account's identity.
+ *
+ * Staff turnover was previously unserviceable: name, email, and role were write-once, so a
+ * coach who changed address or an administrator who was promoted had to be deleted and
+ * recreated, losing their sport assignments. No token bump is needed — currentUser()
+ * re-reads these columns on every request, so a change is live immediately.
+ *
+ * Declared before /:id/sports so Hono's matching stays unambiguous.
+ */
+app.put('/api/admin/users/:id', async c => {
+  const user = await currentUser(c);
+  if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
+  const { id } = c.req.param();
+  const body = await c.req.json<{
+    name?: string; email?: string; role?: string; sportId?: string | null; sportIds?: string[];
+  }>();
+
+  const target = await c.env.DB.prepare(
+    'SELECT id, name, email, role, sport_id, token_version FROM users WHERE id = ?'
+  ).bind(id).first<{
+    id: string; name: string; email: string; role: string;
+    sport_id: string | null; token_version: number | null;
+  }>();
+  if (!target) return err('Not found', 404);
+
+  const nextRole = body.role ?? target.role;
+  if (!['coach', 'sport_admin', 'cfo', 'super_admin'].includes(nextRole)) return err('Invalid role');
+  if (id !== user.sub) {
+    const denied = rankGuard(user.role, target.role, nextRole);
+    if (denied) return err(denied, 403);
+  }
+  if (target.role === 'super_admin' && nextRole !== 'super_admin' && await isLastActiveSuperAdmin(c.env, id)) {
+    return err('The portal must keep at least one active Super Admin', 409);
+  }
+
+  const nextEmail = body.email?.trim().toLowerCase() || target.email;
+  if (!EMAIL_SIMPLE_RE.test(nextEmail)) return err('A valid email is required');
+  if (nextEmail !== target.email) {
+    const clash = await c.env.DB.prepare('SELECT id FROM users WHERE email = ? AND id <> ?')
+      .bind(nextEmail, id).first();
+    if (clash) return err('Email already in use', 409);
+  }
+  const nextName = body.name?.trim() || target.name;
+  if (nextRole === 'sport_admin' && body.sportIds && !body.sportIds.length) {
+    return err('Select at least one sport for this Sport Admin');
+  }
+
+  await c.env.DB.prepare(
+    'UPDATE users SET name = ?, email = ?, role = ?, sport_id = ? WHERE id = ?'
+  ).bind(
+    nextName, nextEmail, nextRole,
+    nextRole === 'coach' ? (body.sportId ?? target.sport_id) : null,
+    id,
+  ).run();
+
+  // Assignments only mean anything for a sport admin; clear them on any other role so a
+  // demoted account stops appearing in that sport's notification fan-out.
+  if (nextRole === 'sport_admin') {
+    if (body.sportIds) await setSportAdminAssignments(c.env, id, body.sportIds);
+  } else {
+    await setSportAdminAssignments(c.env, id, []);
+  }
+
+  await syncAdministratorMirror(c.env, id);
+  await resyncSportsForAdministrator(c.env, id);
+  await audit(c.env, null, 'USER_UPDATED', user.email, {
+    userId: id,
+    before: { name: target.name, email: target.email, role: target.role },
+    after: { name: nextName, email: nextEmail, role: nextRole },
+  }, clientIp(c));
+
+  return json({ ok: true, id, name: nextName, email: nextEmail, role: nextRole });
+});
+
+/**
+ * POST /api/admin/users/:id/reset-password — reset on someone's behalf.
+ *
+ * Two modes because mail to utoledo.edu is not guaranteed. `link` sends the ordinary reset
+ * link and discloses nothing. `temp` returns a temporary password in the response so an
+ * operator can read it out when the message is quarantined — the exact situation where the
+ * self-service flow at /forgot-password is useless. It is never written to audit_log or
+ * email_log.
+ */
+app.post('/api/admin/users/:id/reset-password', async c => {
+  const user = await currentUser(c);
+  if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
+  const { id } = c.req.param();
+  const { mode } = await c.req.json<{ mode?: 'temp' | 'link' }>().catch(() => ({ mode: 'temp' as const }));
+
+  const target = await c.env.DB.prepare(
+    'SELECT email, name, role, token_version FROM users WHERE id = ?'
+  ).bind(id).first<{ email: string; name: string; role: string; token_version: number | null }>();
+  if (!target) return err('Not found', 404);
+  if (id !== user.sub) {
+    const denied = rankGuard(user.role, target.role);
+    if (denied) return err(denied, 403);
+  }
+
+  if (mode === 'link') {
+    const token = `${newUUID()}${newUUID()}`.replace(/-/g, '');
+    await c.env.DB.batch([
+      c.env.DB.prepare('DELETE FROM password_reset_tokens WHERE user_id = ?').bind(id),
+      c.env.DB.prepare(
+        'INSERT INTO password_reset_tokens (token_hash, user_id, expires_at, used) VALUES (?, ?, ?, 0)'
+      ).bind(await sha256Hex(token), id, Math.floor(Date.now() / 1000) + TOKEN_EXPIRATION_SECONDS),
+    ]);
+    deferNotify(c, mailEnv => notifyPasswordReset(mailEnv, target.email, target.name, token));
+    await audit(c.env, null, 'PASSWORD_RESET_LINK_SENT', user.email, { userId: id }, clientIp(c));
+    return json({ ok: true, mode: 'link' });
+  }
+
+  const tempPassword = newUUID().replace(/-/g, '').slice(0, 14);
+  await c.env.DB.batch([
+    // must_change_password re-arms the /api/* gate, so the temporary credential cannot be
+    // used to drive the portal. The token bump kills any session the account still holds.
+    c.env.DB.prepare(
+      `UPDATE users SET password_hash = ?, must_change_password = 1, token_version = ?,
+              failed_login_count = 0, locked_until = NULL WHERE id = ?`
+    ).bind(await hashPassword(tempPassword), (target.token_version ?? 0) + 1, id),
+    c.env.DB.prepare('DELETE FROM password_reset_tokens WHERE user_id = ?').bind(id),
+  ]);
+  deferNotify(c, mailEnv =>
+    notifyAccountCreated(mailEnv, target.email, target.name, tempPassword, roleLabelFor(target.role)));
+  await audit(c.env, null, 'PASSWORD_RESET_BY_ADMIN', user.email, { userId: id }, clientIp(c));
+  return json({ ok: true, mode: 'temp', temporaryPassword: tempPassword });
+});
+
+/**
+ * PUT /api/admin/users/:id/status — deactivate or reactivate.
+ *
+ * The turnover primitive. Preferred over deletion: signatures and audit_log record people
+ * by denormalised email so history survives either way, but keeping the row keeps "who was
+ * this" answerable. currentUser() rejects any status other than active, so the session ends
+ * on the next request.
+ */
+app.put('/api/admin/users/:id/status', async c => {
+  const user = await currentUser(c);
+  if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
+  const { id } = c.req.param();
+  const { status } = await c.req.json<{ status?: string }>();
+  if (status !== 'active' && status !== 'inactive') return err('Status must be active or inactive');
+  if (id === user.sub) return err('You cannot change your own account status', 400);
+
+  const target = await c.env.DB.prepare('SELECT email, role, status, token_version FROM users WHERE id = ?')
+    .bind(id).first<{ email: string; role: string; status: string; token_version: number | null }>();
+  if (!target) return err('Not found', 404);
+  const denied = rankGuard(user.role, target.role);
+  if (denied) return err(denied, 403);
+  if (status === 'inactive' && target.role === 'super_admin' && await isLastActiveSuperAdmin(c.env, id)) {
+    return err('The portal must keep at least one active Super Admin', 409);
+  }
+
+  await c.env.DB.prepare('UPDATE users SET status = ?, token_version = ? WHERE id = ?')
+    .bind(status, (target.token_version ?? 0) + (status === 'inactive' ? 1 : 0), id).run();
+
+  // A deactivated CFO must stop finalizing requests on a single signature, and the status
+  // filters in the resolvers stop them being notified.
+  await resyncSportsForAdministrator(c.env, id);
+  await audit(c.env, null, status === 'active' ? 'USER_REACTIVATED' : 'USER_DEACTIVATED',
+    user.email, { userId: id, email: target.email }, clientIp(c));
+
+  return json({ ok: true, id, status });
 });
 
 // PUT /api/admin/users/:id/sports — update a Sport Admin's sport assignments (4.6)
@@ -1812,9 +2237,6 @@ app.put('/api/admin/users/:id/sports', async c => {
   return json({ ok: true, sportIds: [...new Set(sportIds)] });
 });
 
-// Privilege ranking, so an account cannot be removed by someone at or below its level.
-const ROLE_RANK: Record<string, number> = { coach: 1, sport_admin: 2, cfo: 3, super_admin: 4 };
-
 app.delete('/api/admin/users/:id', async c => {
   const user = await currentUser(c);
   if (!user || !isAdmin(user.role)) return err('Forbidden', 403);
@@ -1826,9 +2248,8 @@ app.delete('/api/admin/users/:id', async c => {
   if (!target) return err('Not found', 404);
 
   // isAdmin() includes cfo, so without this a CFO could delete a Super Admin.
-  if ((ROLE_RANK[target.role] ?? 0) >= (ROLE_RANK[user.role] ?? 0)) {
-    return err('You cannot delete an account at or above your own permission level', 403);
-  }
+  const denied = rankGuard(user.role, target.role);
+  if (denied) return err(denied, 403);
 
   // Sports pointing at this account's mirrored administrator row have to be detached
   // before it goes, or they keep a dangling sport_admin_id and the Sports page renders a
@@ -1863,6 +2284,8 @@ app.put('/api/admin/users/:id/approve', async c => {
 
   await c.env.DB.prepare('UPDATE users SET status = ? WHERE id = ? AND status = ?')
     .bind('active', id, 'pending').run();
+  await syncAdministratorMirror(c.env, id);
+  await resyncSportsForAdministrator(c.env, id);
   await audit(c.env, null, 'USER_APPROVED', user.email, { userId: id, email: target.email }, clientIp(c));
   deferNotify(c, mailEnv => notifyRegistrationDecision(mailEnv, target.email, target.name, true));
   return json({ ok: true });
@@ -1881,6 +2304,7 @@ app.put('/api/admin/users/:id/reject', async c => {
   // session it already holds, not just fail future logins.
   await c.env.DB.prepare('UPDATE users SET status = ?, token_version = ? WHERE id = ?')
     .bind('rejected', (target.token_version ?? 0) + 1, id).run();
+  await resyncSportsForAdministrator(c.env, id);
   await audit(c.env, null, 'USER_REJECTED', user.email, { userId: id, email: target.email }, clientIp(c));
   deferNotify(c, mailEnv => notifyRegistrationDecision(mailEnv, target.email, target.name, false));
   return json({ ok: true });
@@ -2208,7 +2632,12 @@ app.put('/api/admin/coaches/:id', async c => {
   const sportId = coach.sport_id as string;
 
   const email = body.email !== undefined ? body.email.trim().toLowerCase() : (coach.email as string);
-  if (email && !EMAIL_RE.test(email)) return err('Invalid email');
+  // `email &&` used to short-circuit, so a blank address survived an edit and the coach
+  // stayed unroutable and unpickable on the request form. Matches the create endpoint,
+  // and is what stops the backfilled empty-email rows from regressing once repaired.
+  if (!email || !EMAIL_RE.test(email)) {
+    return err('A valid email is required — a coach with no address cannot be notified');
+  }
   const delegateEmail = body.delegatedApproverEmail?.trim() || null;
   if (delegateEmail && !EMAIL_RE.test(delegateEmail)) return err('Invalid delegate email');
 
@@ -2414,9 +2843,19 @@ app.post('/api/requests/bulk', async c => {
       ).bind(rocketNumber, r.term).first();
       if (dup) { skipped.push({ row: i + 1, studentName, reason: `Duplicate — active request already exists for ${r.term}` }); continue; }
 
-      const id = newUUID();
       const coachName = r.coachName?.trim() || sportRow.head_coach?.trim() || '';
       const coachEmail = (r.coachEmail?.trim() || sportRow.head_coach_email || '') || null;
+      // Skip the row rather than failing the whole import — a CSV of 200 athletes should
+      // not be rejected wholesale because one sport has no coach address on file.
+      if (!coachEmail) {
+        skipped.push({
+          row: i + 1, studentName,
+          reason: 'No coach email — enter one on the form, or add it in Sports & Coaches',
+        });
+        continue;
+      }
+
+      const id = newUUID();
       await c.env.DB.prepare(`
         INSERT INTO insurance_requests
           (id, student_name, rocket_number, student_email, sport, term, premium_cost, funding_source, status, coach_email, coach_name)
@@ -2496,7 +2935,7 @@ async function runReminders(env: Env): Promise<void> {
            EXISTS(SELECT 1 FROM signatures s WHERE s.request_id = ir.id AND s.signatory_role = 'CFO') as cfoSigned
     FROM insurance_requests ir
     LEFT JOIN sports_programs sp ON ir.sport = sp.id
-    LEFT JOIN sport_administrators sa ON sp.sport_admin_id = sa.id
+    LEFT JOIN users sa ON sp.sport_admin_id = sa.id AND sa.status = 'active'
     WHERE ir.status IN ('PENDING_COACH', 'PENDING_APPROVAL')
       AND ir.created_at < ?
       AND ir.reminder_count < ?
@@ -2587,6 +3026,41 @@ async function runReminders(env: Env): Promise<void> {
  * pending forever and the duplicate guard kept rejecting a corrected resubmission for
  * the same athlete and term. This closes that loop.
  */
+/**
+ * Return a lapsed test mode to live.
+ *
+ * resolveMailPolicy already treats an expired window as live, so this changes no send
+ * behaviour — it reconciles the stored row with the effective one. Without it, Settings
+ * and the site-wide banner would keep saying mail is suppressed long after it resumed,
+ * which is the kind of disagreement that makes an operator stop trusting the indicator.
+ */
+async function runMailModeExpiry(env: Env): Promise<void> {
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT setting_key, setting_value FROM app_settings
+       WHERE setting_key IN ('mail_mode', 'mail_mode_expires_at')`
+    ).all<{ setting_key: string; setting_value: string }>();
+    const map = new Map(results.map(r => [r.setting_key, r.setting_value]));
+    const mode = (map.get('mail_mode') ?? 'live').trim();
+    const expiresAt = (map.get('mail_mode_expires_at') ?? '').trim();
+    if (mode === 'live' || !expiresAt || Date.parse(expiresAt) > Date.now()) return;
+
+    const upsert = (key: string, value: string) => env.DB.prepare(
+      `INSERT INTO app_settings (setting_key, setting_value, updated_at)
+       VALUES (?, ?, datetime('now'))
+       ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = datetime('now')`
+    ).bind(key, value);
+    await env.DB.batch([
+      upsert('mail_mode', 'live'),
+      upsert('mail_mode_expires_at', ''),
+      upsert('mail_mode_set_by', ''),
+    ]);
+    await audit(env, null, 'MAIL_MODE_CHANGED', 'system', { from: mode, to: 'live', reason: 'expired' });
+  } catch (e) {
+    console.warn(`[mail-mode] expiry sweep failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function runExpiry(env: Env): Promise<void> {
   // Work out which terms are past their deadline first, then select only requests in
   // those terms. Taking the oldest N pending rows and filtering them afterwards would
@@ -2632,6 +3106,10 @@ async function runExpiry(env: Env): Promise<void> {
 export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext) {
+    // Before anything that sends: a lapsed test mode must be written back to live so the
+    // stored state matches what resolveMailPolicy is already doing, and so the banner
+    // clears. Otherwise Settings keeps claiming mail is suppressed while it is flowing.
+    await runMailModeExpiry(env);
     // Expire first, so a request past its deadline is not also chased for a signature.
     await runExpiry(env);
     await runReminders(env);

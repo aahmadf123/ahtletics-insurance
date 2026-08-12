@@ -195,9 +195,24 @@ export function AdminSports() {
 
   const adminOptions = (
     <>
-      <option value="">— None —</option>
+      <option value="">
+        {admins.length ? '— None —' : '— No administrators yet: add one on the Users page —'}
+      </option>
       {admins.map(a => <option key={a.id} value={a.id}>{a.name}{a.isCfo ? ' (CFO)' : ''}</option>)}
     </>
+  );
+
+  // A coach with no address cannot be notified and cannot be picked on the request form, so
+  // step 1 of the approval chain silently goes nowhere for that sport.
+  const incomplete = sports.filter(s => (s.coachesMissingEmail ?? 0) > 0 || !s.headCoachEmail);
+
+  const incompleteBanner = incomplete.length > 0 && (
+    <p className="error" style={{ marginBottom: '1rem' }}>
+      <strong>{incomplete.length} sport{incomplete.length === 1 ? '' : 's'} cannot route an approval request.</strong>{' '}
+      Without a head coach who has an email address, the first approval step is never delivered
+      and the request sits waiting. Expand each sport below and add the address:{' '}
+      {incomplete.map(s => s.name).join(', ')}.
+    </p>
   );
 
   return (
@@ -214,6 +229,7 @@ export function AdminSports() {
       </p>
 
       {error && <p className="error">{error}</p>}
+      {incompleteBanner}
 
       {showAdd && (
         <form className="form-card" onSubmit={handleCreate}>
@@ -300,11 +316,22 @@ export function AdminSports() {
                         <td>{s.gender}</td>
                         <td>
                           {s.headCoach
-                            ? <span>{s.headCoach}{s.headCoachEmail ? <><br /><span className="muted" style={{ fontSize: '.8rem' }}>{s.headCoachEmail}</span></> : null}</span>
-                            : <span className="muted">— none —</span>}
+                            ? (
+                              <span>
+                                {s.headCoach}
+                                {s.headCoachEmail
+                                  ? <><br /><span className="muted" style={{ fontSize: '.8rem' }}>{s.headCoachEmail}</span></>
+                                  : <><br /><span className="badge badge--danger" style={{ fontSize: '.7rem' }}>Email missing</span></>}
+                              </span>
+                            )
+                            : <span className="badge badge--danger" style={{ fontSize: '.7rem' }}>No head coach</span>}
                         </td>
                         <td>{s.staffCount ? `${s.staffCount} staff` : <span className="muted">0</span>}</td>
-                        <td>{adminName(s.sportAdminId)}</td>
+                        <td>
+                          {s.sportAdminId
+                            ? adminName(s.sportAdminId)
+                            : <span className="badge badge--danger" style={{ fontSize: '.7rem' }}>Unassigned</span>}
+                        </td>
                         <td style={{ display: 'flex', gap: '8px' }}>
                           <button className="btn btn-secondary" style={{ padding: '4px 12px', fontSize: '0.8rem' }}
                             onClick={() => startEdit(s)}>Edit</button>

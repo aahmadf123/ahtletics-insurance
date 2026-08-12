@@ -114,11 +114,11 @@ Inbound MX on the apex does not affect outbound sending: that is governed by the
 `app_settings` table, which takes precedence at send time.
 
 ```jsonc
-"FROM_NAME":       "Toledo Athletics Business Office",
-"FROM_EMAIL":      "noreply@mail.utrockets-insurance.com",
-"REPLY_TO_EMAIL":  "athletics-insurance@utrockets-insurance.com",
-"CFO_EMAIL":       "melissa.deangelo@utoledo.edu",
-"APP_BASE_URL":    "https://utrockets-insurance.com"
+"FROM_NAME":                    "Toledo Athletics Business Office",
+"FROM_EMAIL":                   "noreply@mail.utrockets-insurance.com",
+"REPLY_TO_EMAIL":               "athletics-insurance@utrockets-insurance.com",
+"FALLBACK_NOTIFICATION_EMAIL":  "athletics-insurance@utrockets-insurance.com",
+"APP_BASE_URL":                 "https://utrockets-insurance.com"
 ```
 
 These must name the Resend-verified sending domain even though `app_settings` normally
@@ -126,11 +126,11 @@ wins, because they are exactly what gets used when the settings read fails. A fa
 pointing at an unverified domain converts a transient database error into a total
 sending outage, which is the failure mode the fallback exists to prevent.
 
-`app_settings` currently holds `from_email = noreply@mail.utrockets-insurance.com`; it
-has no `reply_to` row, so `REPLY_TO_EMAIL` above is what ships on every message.
-
-`CFO_EMAIL` is a fallback only. Notifications resolve the CFO from active `cfo` accounts
-at send time, so adding a CFO in the Users page is enough.
+`FALLBACK_NOTIFICATION_EMAIL` is a last resort, used only when no active `cfo` account
+exists — otherwise `notifyPendingCFO` would send to nobody, silently. It must be a role
+address, never a person: a named individual here outlives their employment and cannot be
+corrected without a redeploy. That is exactly the defect that put five real staff members
+into the seed migration, and it is why nobody is seeded any more.
 
 The API key is a secret and must not go in `wrangler.jsonc`:
 
@@ -139,7 +139,30 @@ cd worker
 npx wrangler secret put RESEND_API_KEY
 ```
 
-With no key set, the Worker skips sending and records each message in `email_log` with
+## Test mode
+
+Super Admin, Settings has a **mail mode** — `live`, `redirect`, or `suppress` — enforced in
+`sendEmail()` ahead of the API-key check, so no template can route around it.
+
+| Mode | Sends | `email_log` |
+|---|---|---|
+| `live` | normally | `sent` / `failed` |
+| `redirect` | everything to one nominated address, with the real recipients named in the subject and body | one row per intended recipient, `redirected_to` set |
+| `suppress` | nothing | one row per intended recipient, `suppressed` |
+
+Use `redirect` to rehearse a full request end to end — including the executed-request PDF —
+without contacting anyone. Use `suppress` as a stop button.
+
+Four things stop it being left on by accident: a non-dismissible banner shown to **every**
+signed-in user, a required expiry that the hourly cron writes back to `live`, the Settings
+page showing stored versus effective mode, and `redirected`/`suppressed` badges in the
+delivery log on each request. Every change is written to `audit_log`.
+
+`env.preview` sets `MAIL_LOCKED_MODE: "suppress"` in `wrangler.jsonc`. Because that is a var
+rather than a database row, Settings cannot loosen it and neither can restoring a production
+D1 backup into the preview database.
+
+With no API key set at all, the Worker skips sending and records each message in `email_log` with
 status `skipped`, which is useful for local work.
 
 ## Verifying it worked

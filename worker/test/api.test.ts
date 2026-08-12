@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { env } from 'cloudflare:test';
 import {
-  resetDatabase, seedUser, seedRequest, seedSignature, call, anonymousCoachCookie, runScheduled,
+  resetDatabase, seedUser, seedAdministrator, seedHeadCoach, seedRequest, seedSignature,
+  call, anonymousCoachCookie, runScheduled,
 } from './helpers';
 
 beforeEach(resetDatabase);
@@ -243,8 +244,6 @@ describe('administrator accounts are visible to the Sports page', () => {
     const list = await (await call('/api/admin/sport-admins', { cookie: boss.cookie }))
       .json<{ id: string; name: string }[]>();
     expect(list.map(a => a.id)).toContain(created.id);
-    // The originally seeded administrators are not displaced by the mirroring.
-    expect(list.map(a => a.id)).toContain('brian_lutz');
   });
 
   it('flags a created cfo so its sports finalize on one signature', async () => {
@@ -304,26 +303,6 @@ describe('administrator accounts are visible to the Sports page', () => {
     expect(sport!.sport_admin_id).toBeNull();
   });
 
-  it('does not duplicate a seeded administrator who is later given a login', async () => {
-    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
-
-    const res = await call('/api/admin/users', {
-      method: 'POST', cookie: boss.cookie,
-      body: JSON.stringify({
-        email: 'brian.lutz@utoledo.edu', password: 'temp-password-1', name: 'Brian Lutz',
-        role: 'sport_admin', sportIds: ['womens_golf'],
-      }),
-    });
-    expect(res.status).toBe(201);
-
-    const rows = await env.DB.prepare(
-      'SELECT id FROM sport_administrators WHERE lower(email) = ?'
-    ).bind('brian.lutz@utoledo.edu').all<{ id: string }>();
-    // Two entries for one person would make the Sports picker ambiguous.
-    expect(rows.results.length).toBe(1);
-    expect(rows.results[0].id).toBe('brian_lutz');
-  });
-
   it('hides a mirrored administrator once the account is deactivated', async () => {
     const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
     const created = await (await call('/api/admin/users', {
@@ -339,7 +318,6 @@ describe('administrator accounts are visible to the Sports page', () => {
     const list = await (await call('/api/admin/sport-admins', { cookie: boss.cookie }))
       .json<{ id: string }[]>();
     expect(list.map(a => a.id)).not.toContain(created.id);
-    expect(list.map(a => a.id)).toContain('brian_lutz');
   });
 });
 
@@ -458,7 +436,11 @@ describe('submission is all or nothing', () => {
 
 describe('single-approval rule comes from the sport row', () => {
   it('executes softball on the CFO signature alone', async () => {
-    const cfo = await seedUser({ email: 'cfo@example.edu', role: 'cfo' });
+    // The flag is no longer seeded — it is derived from who administers the sport, so the
+    // CFO has to actually be its administrator for one signature to finalize.
+    const cfo = await seedAdministrator({
+      email: 'cfo@example.edu', role: 'cfo', primaryFor: ['womens_softball'],
+    });
     const id = await seedRequest({ sport: 'womens_softball', status: 'PENDING_APPROVAL' });
     await seedSignature(id, 'COACH');
 
@@ -618,10 +600,11 @@ describe('single_approval stays in step with the administrator', () => {
   // create a sport or reassign its administrator afterwards, and the flag drifts both ways.
   it('sets the flag when a new sport is created under the CFO', async () => {
     const superAdmin = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    const cfo = await seedAdministrator({ email: 'cfo@example.edu', role: 'cfo' });
     const res = await call('/api/admin/sports', {
       method: 'POST',
       cookie: superAdmin.cookie,
-      body: JSON.stringify({ name: 'Beach Volleyball', gender: 'Womens', sportAdminId: 'melissa_deangelo' }),
+      body: JSON.stringify({ name: 'Beach Volleyball', gender: 'Womens', sportAdminId: cfo.id }),
     });
     expect(res.status).toBe(201);
     const { id } = await res.json<{ id: string }>();
@@ -633,10 +616,11 @@ describe('single_approval stays in step with the administrator', () => {
 
   it('leaves the flag clear for a sport under a non-CFO administrator', async () => {
     const superAdmin = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    const admin = await seedAdministrator({ email: 'sa@example.edu', role: 'sport_admin' });
     const res = await call('/api/admin/sports', {
       method: 'POST',
       cookie: superAdmin.cookie,
-      body: JSON.stringify({ name: 'Wrestling', gender: 'Mens', sportAdminId: 'brian_lutz' }),
+      body: JSON.stringify({ name: 'Wrestling', gender: 'Mens', sportAdminId: admin.id }),
     });
     const { id } = await res.json<{ id: string }>();
 
@@ -647,10 +631,13 @@ describe('single_approval stays in step with the administrator', () => {
 
   it('clears the flag when softball is moved off the CFO', async () => {
     const superAdmin = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    const cfo = await seedAdministrator({ email: 'cfo@example.edu', role: 'cfo', primaryFor: ['womens_softball'] });
+    expect(cfo.id).toBeTruthy();
+    const admin = await seedAdministrator({ email: 'sa@example.edu', role: 'sport_admin' });
     await call('/api/admin/sports/womens_softball', {
       method: 'PUT',
       cookie: superAdmin.cookie,
-      body: JSON.stringify({ sportAdminId: 'brian_lutz' }),
+      body: JSON.stringify({ sportAdminId: admin.id }),
     });
 
     // Otherwise the CFO could still execute alone on a sport they no longer administer.
@@ -661,10 +648,11 @@ describe('single_approval stays in step with the administrator', () => {
 
   it('sets the flag when an existing sport is moved onto the CFO', async () => {
     const superAdmin = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    const cfo = await seedAdministrator({ email: 'cfo@example.edu', role: 'cfo' });
     await call('/api/admin/sports/womens_soccer', {
       method: 'PUT',
       cookie: superAdmin.cookie,
-      body: JSON.stringify({ sportAdminId: 'melissa_deangelo' }),
+      body: JSON.stringify({ sportAdminId: cfo.id }),
     });
 
     // Otherwise the workflow waits for a second signature from the same person.
@@ -810,5 +798,246 @@ describe('removed endpoints', () => {
     const res = await call('/api/does-not-exist');
     expect(res.status).toBe(404);
     expect(res.headers.get('Content-Type')).toContain('application/json');
+  });
+});
+
+describe('the coach email is required and the head coach is routable', () => {
+  // Migration 0006 backfilled the coaches table from the seed with email = '', and the form
+  // let a coach pick their name and submit with the field blank and read-only. coach_email
+  // landed NULL, notifyCoachSubmitted returned early, and getHeadCoachForSport returned null
+  // so step 1 was never sent at all — silently.
+  const submit = (cookie: string, body: Record<string, unknown>) =>
+    call('/api/requests', { method: 'POST', cookie, body: JSON.stringify(body) });
+
+  const baseRequest = {
+    sport: 'womens_soccer', term: 'Fall 2099', coachName: 'Test Coach',
+    fundingSource: 'operating_budget',
+    athletes: [{ studentName: 'Test Athlete', rocketNumber: 'R00000123' }],
+  };
+
+  it('refuses a submission with no coach email', async () => {
+    const coach = await seedUser({ email: 'coach@example.edu', role: 'coach' });
+    const res = await submit(coach.cookie, baseRequest);
+
+    expect(res.status).toBe(400);
+    const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM insurance_requests').first<{ n: number }>();
+    expect(row!.n).toBe(0);
+  });
+
+  it('sends the submitting coach their confirmation', async () => {
+    const coach = await seedUser({ email: 'coach@example.edu', role: 'coach' });
+    const res = await submit(coach.cookie, { ...baseRequest, coachEmail: 'coach@example.edu' });
+    expect(res.status).toBe(201);
+
+    const row = await env.DB.prepare(
+      'SELECT to_email FROM email_log WHERE template = ?'
+    ).bind('notifyCoachSubmitted').first<{ to_email: string }>();
+    expect(row!.to_email).toBe('coach@example.edu');
+  });
+
+  it('records that the head coach could not be reached', async () => {
+    // The sport has no routable head coach, so step 1 has nowhere to go. That must show up
+    // in the delivery log rather than being swallowed.
+    const coach = await seedUser({ email: 'coach@example.edu', role: 'coach' });
+    await submit(coach.cookie, { ...baseRequest, coachEmail: 'coach@example.edu' });
+
+    const row = await env.DB.prepare(
+      'SELECT status, error FROM email_log WHERE template = ?'
+    ).bind('notifyPendingHeadCoach').first<{ status: string; error: string }>();
+    expect(row).toBeTruthy();
+    expect(row!.status).toBe('failed');
+    expect(row!.error).toMatch(/no head coach email/i);
+  });
+
+  it('routes to the head coach once an address is on file', async () => {
+    await seedHeadCoach('womens_soccer', 'head@example.edu');
+    const coach = await seedUser({ email: 'coach@example.edu', role: 'coach' });
+    await submit(coach.cookie, { ...baseRequest, coachEmail: 'coach@example.edu' });
+
+    const row = await env.DB.prepare(
+      'SELECT to_email, status FROM email_log WHERE template = ?'
+    ).bind('notifyPendingHeadCoach').first<{ to_email: string; status: string }>();
+    expect(row!.to_email).toBe('head@example.edu');
+    expect(row!.status).not.toBe('failed');
+  });
+
+  it('refuses to save a coach with a blank email', async () => {
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    const coachId = await seedHeadCoach('womens_soccer', 'head@example.edu');
+
+    const res = await call(`/api/admin/coaches/${coachId}`, {
+      method: 'PUT', cookie: boss.cookie, body: JSON.stringify({ email: '' }),
+    });
+    expect(res.status).toBe(400);
+
+    const row = await env.DB.prepare('SELECT email FROM coaches WHERE id = ?')
+      .bind(coachId).first<{ email: string }>();
+    expect(row!.email).toBe('head@example.edu');
+  });
+
+  it('flags sports whose coaches have no address', async () => {
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    await env.DB.prepare(
+      `INSERT INTO coaches (id, display_name, email, sport_id, title, is_head_coach)
+       VALUES ('c_blank', 'No Address', '', 'womens_soccer', 'Head Coach', 1)`
+    ).run();
+
+    const sports = await (await call('/api/sports', { cookie: boss.cookie }))
+      .json<{ id: string; coachesMissingEmail: number }[]>();
+    expect(sports.find(s => s.id === 'womens_soccer')!.coachesMissingEmail).toBe(1);
+    expect(sports.find(s => s.id === 'mens_golf')!.coachesMissingEmail).toBe(0);
+  });
+
+  it('skips a CSV row with no coach email instead of creating it', async () => {
+    const coach = await seedUser({ email: 'coach@example.edu', role: 'coach' });
+    const res = await call('/api/requests/bulk', {
+      method: 'POST', cookie: coach.cookie,
+      body: JSON.stringify({
+        rows: [{
+          sport: 'womens_soccer', term: 'Fall 2099', studentName: 'Test Athlete',
+          rocketNumber: 'R00000456', fundingSource: 'operating_budget',
+        }],
+      }),
+    });
+
+    const body = await res.json<{ skipped: { reason: string }[]; created?: unknown[] }>();
+    expect(body.skipped).toHaveLength(1);
+    expect(body.skipped[0].reason).toMatch(/coach email/i);
+    const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM insurance_requests').first<{ n: number }>();
+    expect(row!.n).toBe(0);
+  });
+});
+
+describe('turnover is serviceable without SQL', () => {
+  // sport_administrators had no UPDATE path anywhere in the codebase and no status column,
+  // so a departed administrator kept receiving student-athlete notifications forever.
+  it('drops a deactivated sport administrator from the fan-out', async () => {
+    const admin = await seedAdministrator({
+      email: 'sa@example.edu', role: 'sport_admin', primaryFor: ['womens_soccer'], sportIds: ['womens_soccer'],
+    });
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+
+    const res = await call(`/api/admin/users/${admin.id}/status`, {
+      method: 'PUT', cookie: boss.cookie, body: JSON.stringify({ status: 'inactive' }),
+    });
+    expect(res.status).toBe(200);
+
+    const id = await seedRequest({ sport: 'womens_soccer', status: 'PENDING_APPROVAL' });
+    await seedSignature(id, 'COACH');
+    await call(`/api/requests/${id}/sign`, {
+      method: 'POST', cookie: (await seedUser({ email: 'cfo@example.edu', role: 'cfo' })).cookie, body: '{}',
+    });
+
+    const { results } = await env.DB.prepare('SELECT DISTINCT to_email FROM email_log').all<{ to_email: string }>();
+    expect(results.map(r => r.to_email)).not.toContain('sa@example.edu');
+  });
+
+  it('stops a deactivated CFO finalizing a request alone', async () => {
+    const cfo = await seedAdministrator({
+      email: 'cfo@example.edu', role: 'cfo', primaryFor: ['womens_softball'],
+    });
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    expect((await env.DB.prepare("SELECT single_approval AS s FROM sports_programs WHERE id = 'womens_softball'")
+      .first<{ s: number }>())!.s).toBe(1);
+
+    await call(`/api/admin/users/${cfo.id}/status`, {
+      method: 'PUT', cookie: boss.cookie, body: JSON.stringify({ status: 'inactive' }),
+    });
+
+    const row = await env.DB.prepare("SELECT single_approval AS s FROM sports_programs WHERE id = 'womens_softball'")
+      .first<{ s: number }>();
+    expect(row!.s).toBe(0);
+  });
+
+  it('renames an administrator everywhere at once', async () => {
+    const admin = await seedAdministrator({
+      email: 'old@example.edu', role: 'sport_admin', name: 'Old Name', primaryFor: ['womens_soccer'],
+    });
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+
+    const res = await call(`/api/admin/users/${admin.id}`, {
+      method: 'PUT', cookie: boss.cookie,
+      body: JSON.stringify({ name: 'New Name', email: 'new@example.edu' }),
+    });
+    expect(res.status).toBe(200);
+
+    const sports = await (await call('/api/sports', { cookie: boss.cookie }))
+      .json<{ id: string; sportAdminName: string; sportAdminEmail: string }[]>();
+    const soccer = sports.find(s => s.id === 'womens_soccer')!;
+    expect(soccer.sportAdminName).toBe('New Name');
+    expect(soccer.sportAdminEmail).toBe('new@example.edu');
+  });
+
+  it('refuses a duplicate email and an edit above your own rank', async () => {
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    const taken = await seedUser({ email: 'taken@example.edu', role: 'coach' });
+    const other = await seedUser({ email: 'other@example.edu', role: 'coach' });
+
+    expect((await call(`/api/admin/users/${other.id}`, {
+      method: 'PUT', cookie: boss.cookie, body: JSON.stringify({ email: taken.email }),
+    })).status).toBe(409);
+
+    // isAdmin() includes cfo, so without the rank guard a CFO could rewrite a Super Admin.
+    const cfo = await seedUser({ email: 'cfo@example.edu', role: 'cfo' });
+    expect((await call(`/api/admin/users/${boss.id}`, {
+      method: 'PUT', cookie: cfo.cookie, body: JSON.stringify({ name: 'Hijacked' }),
+    })).status).toBe(403);
+
+    // ...nor grant a role at or above their own.
+    expect((await call(`/api/admin/users/${other.id}`, {
+      method: 'PUT', cookie: cfo.cookie, body: JSON.stringify({ role: 'super_admin' }),
+    })).status).toBe(403);
+  });
+
+  it('detaches sports when an administrator is demoted', async () => {
+    const admin = await seedAdministrator({
+      email: 'sa@example.edu', role: 'sport_admin', primaryFor: ['womens_soccer'], sportIds: ['womens_soccer'],
+    });
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+
+    await call(`/api/admin/users/${admin.id}`, {
+      method: 'PUT', cookie: boss.cookie, body: JSON.stringify({ role: 'coach' }),
+    });
+
+    const sport = await env.DB.prepare("SELECT sport_admin_id FROM sports_programs WHERE id = 'womens_soccer'")
+      .first<{ sport_admin_id: string | null }>();
+    expect(sport!.sport_admin_id).toBeNull();
+    expect(await env.DB.prepare('SELECT id FROM sport_administrators WHERE id = ?')
+      .bind(admin.id).first()).toBeNull();
+    expect(await env.DB.prepare('SELECT id FROM sport_admin_assignments WHERE admin_user_id = ?')
+      .bind(admin.id).first()).toBeNull();
+  });
+
+  it('resets a password on the account holder\'s behalf', async () => {
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    const target = await seedUser({ email: 'coach@example.edu', role: 'coach' });
+
+    const res = await call(`/api/admin/users/${target.id}/reset-password`, {
+      method: 'POST', cookie: boss.cookie, body: JSON.stringify({ mode: 'temp' }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json<{ temporaryPassword: string }>();
+    expect(body.temporaryPassword).toBeTruthy();
+
+    const row = await env.DB.prepare('SELECT must_change_password AS m, token_version AS tv FROM users WHERE id = ?')
+      .bind(target.id).first<{ m: number; tv: number }>();
+    expect(row!.m).toBe(1);         // the /api/* gate is re-armed
+    expect(row!.tv).toBe(1);        // and any live session is dead
+    expect((await call('/auth/me', { cookie: target.cookie })).status).toBe(401);
+  });
+
+  it('keeps at least one active Super Admin', async () => {
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    const other = await seedUser({ email: 'other@example.edu', role: 'super_admin' });
+
+    // Demoting the last one would lock everyone out of the portal permanently.
+    expect((await call(`/api/admin/users/${other.id}`, {
+      method: 'PUT', cookie: boss.cookie, body: JSON.stringify({ role: 'coach' }),
+    })).status).toBe(403);   // rank guard fires first: equal rank
+
+    await env.DB.prepare('DELETE FROM users WHERE id = ?').bind(other.id).run();
+    expect((await call(`/api/admin/users/${boss.id}`, {
+      method: 'PUT', cookie: boss.cookie, body: JSON.stringify({ role: 'coach' }),
+    })).status).toBe(409);
   });
 });

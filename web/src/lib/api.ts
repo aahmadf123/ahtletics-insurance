@@ -155,8 +155,10 @@ export interface EmailLogEntry {
   subject: string;
   template: string;
   providerId: string | null;
-  status: 'sent' | 'failed' | 'skipped';
+  status: 'sent' | 'failed' | 'skipped' | 'suppressed';
   error: string | null;
+  /** Set when test mode rerouted this message. `toEmail` is still who it was about. */
+  redirectedTo?: string | null;
   createdAt: string;
 }
 
@@ -287,11 +289,27 @@ export function getAuditCsvUrl(params?: Record<string, string>) {
 }
 
 // Admin — system settings (Super Admin)
+export type MailMode = 'live' | 'redirect' | 'suppress';
+
+/** What resolveMailPolicy actually decided, which can differ from what is stored. */
+export interface MailPolicy {
+  mode: MailMode;
+  testAddress: string;
+  reason: string | null;
+  locked: boolean;
+}
+
 export interface AdminSettings {
   fromName: string;
   fromEmail: string;
   appBaseUrl: string;
   replyTo: string;
+  mailMode: MailMode;
+  mailTestAddress: string;
+  mailModeExpiresAt: string;
+  mailModeSetBy: string;
+  /** Read-only; present on GET so the page can show stored vs effective. */
+  effective?: MailPolicy;
 }
 
 // Auth — first-run setup
@@ -309,11 +327,34 @@ export function getAdminSettings() {
   return request<AdminSettings>('/api/admin/settings');
 }
 
-export function updateAdminSettings(data: AdminSettings) {
+export function updateAdminSettings(data: Omit<AdminSettings, 'effective' | 'mailModeSetBy'>) {
   return request<{ ok: boolean } & AdminSettings>('/api/admin/settings', {
     method: 'PUT',
     body: JSON.stringify(data),
   });
+}
+
+/** Prove the configuration by sending one message through the ordinary path. */
+export function sendTestEmail(to?: string) {
+  return request<{ ok: boolean; to: string; effective: MailPolicy }>('/api/admin/settings/test-email', {
+    method: 'POST',
+    body: JSON.stringify({ to }),
+  });
+}
+
+export interface OnboardingState {
+  settingsConfigured: boolean;
+  cfoCount: number;
+  sportAdminCount: number;
+  sportsWithoutAdmin: { id: string; name: string }[];
+  sportsWithoutHeadCoach: { id: string; name: string }[];
+  mailMode: MailMode;
+  complete: boolean;
+}
+
+/** What still has to be configured before the portal can route anything. */
+export function getOnboarding() {
+  return request<OnboardingState>('/api/admin/onboarding');
 }
 
 // Admin — users
@@ -331,6 +372,32 @@ export interface AdminUser {
 
 export function listUsers() {
   return request<AdminUser[]>('/api/admin/users');
+}
+
+/** Edit an account's identity. Turnover used to need a delete-and-recreate. */
+export function updateUser(id: string, data: {
+  name?: string; email?: string; role?: string; sportId?: string | null; sportIds?: string[];
+}) {
+  return request<{ ok: boolean; id: string; name: string; email: string; role: string }>(
+    `/api/admin/users/${id}`, { method: 'PUT', body: JSON.stringify(data) },
+  );
+}
+
+/**
+ * `temp` returns the password so it can be read out when the message is quarantined —
+ * which is exactly the case where the self-service reset link is no use.
+ */
+export function resetUserPassword(id: string, mode: 'temp' | 'link') {
+  return request<{ ok: boolean; mode: string; temporaryPassword?: string }>(
+    `/api/admin/users/${id}/reset-password`, { method: 'POST', body: JSON.stringify({ mode }) },
+  );
+}
+
+/** Preferred over deletion: keeps history answerable while stopping all access and mail. */
+export function setUserStatus(id: string, status: 'active' | 'inactive') {
+  return request<{ ok: boolean; id: string; status: string }>(
+    `/api/admin/users/${id}/status`, { method: 'PUT', body: JSON.stringify({ status }) },
+  );
 }
 
 export function createUser(data: {

@@ -22,7 +22,7 @@ export default defineWorkersConfig(async () => {
             bindings: {
               TEST_MIGRATIONS: migrations,
               JWT_SECRET: 'test-secret-not-used-anywhere-real',
-              CFO_EMAIL: 'cfo@example.edu',
+              FALLBACK_NOTIFICATION_EMAIL: 'cfo@example.edu',
               FROM_NAME: 'Test Sender',
               FROM_EMAIL: 'noreply@example.test',
               APP_BASE_URL: 'https://portal.example.test',

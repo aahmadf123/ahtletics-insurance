@@ -42,7 +42,9 @@ export function Setup() {
         name: name.trim(), email: email.trim(), password, role: 'super_admin',
       });
       await refresh();
-      navigate('/dashboard');
+      // Straight to the checklist, not the dashboard: a fresh database has sixteen sports
+      // and nobody attached to any of them, so the dashboard would be empty and silent.
+      navigate('/admin/setup');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Setup failed');
       setSubmitting(false);

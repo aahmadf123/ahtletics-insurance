@@ -1,6 +1,9 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '../../lib/auth';
-import { listUsers, createUser, deleteUser, approveUser, rejectUser, listSports, updateUserSports } from '../../lib/api';
+import {
+  listUsers, createUser, deleteUser, approveUser, rejectUser, listSports, updateUserSports,
+  updateUser, resetUserPassword, setUserStatus,
+} from '../../lib/api';
 import type { AdminUser } from '../../lib/api';
 import type { SportProgram } from '../../types';
 
@@ -25,6 +28,16 @@ export function AdminUsers() {
   const [editingSportsFor, setEditingSportsFor] = useState<string | null>(null);
   const [editSportIds, setEditSportIds] = useState<Set<string>>(new Set());
   const [savingSports, setSavingSports] = useState(false);
+
+  // Identity editing. Name, email, and role used to be write-once, so a coach who changed
+  // address or an administrator who was promoted had to be deleted and recreated — losing
+  // their sport assignments in the process.
+  const [editingUser, setEditingUser] = useState<string | null>(null);
+  const [draft, setDraft] = useState({ name: '', email: '', role: '' });
+  const [savingUser, setSavingUser] = useState(false);
+  // Shown once, on screen, because the message carrying it may be quarantined.
+  const [tempPassword, setTempPassword] = useState<{ name: string; password: string } | null>(null);
+  const [busyUser, setBusyUser] = useState<string | null>(null);
 
   const sportName = (id: string) => sports.find(s => s.id === id)?.name ?? id;
   const toggle = (set: Set<string>, id: string) => {
@@ -95,6 +108,60 @@ export function AdminUsers() {
       setCreateError(err instanceof Error ? err.message : 'Failed to create user');
     } finally {
       setCreating(false);
+    }
+  };
+
+  const startEditUser = (u: AdminUser) => {
+    setEditingUser(u.id);
+    setDraft({ name: u.name, email: u.email, role: u.role });
+    setError('');
+  };
+
+  const handleSaveUser = async (id: string) => {
+    setSavingUser(true);
+    setError('');
+    try {
+      await updateUser(id, { name: draft.name.trim(), email: draft.email.trim(), role: draft.role });
+      setEditingUser(null);
+      refresh();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to update account');
+    } finally {
+      setSavingUser(false);
+    }
+  };
+
+  const handleResetPassword = async (u: AdminUser) => {
+    if (!confirm(`Reset the password for ${u.name}? Any session they have open will end.`)) return;
+    setBusyUser(u.id);
+    setError('');
+    try {
+      const res = await resetUserPassword(u.id, 'temp');
+      if (res.temporaryPassword) setTempPassword({ name: u.name, password: res.temporaryPassword });
+      refresh();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to reset password');
+    } finally {
+      setBusyUser(null);
+    }
+  };
+
+  const handleToggleStatus = async (u: AdminUser) => {
+    const next = (u.status ?? 'active') === 'active' ? 'inactive' : 'active';
+    const warning = next === 'inactive'
+      ? `Deactivate ${u.name}? They lose access immediately and stop receiving notifications. `
+        + 'History is kept — prefer this to deleting.'
+      : `Reactivate ${u.name}?`;
+    if (!confirm(warning)) return;
+    setBusyUser(u.id);
+    setError('');
+    try {
+      await setUserStatus(u.id, next);
+      refresh();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to change status');
+    } finally {
+      setBusyUser(null);
     }
   };
 
@@ -242,6 +309,26 @@ export function AdminUsers() {
         </div>
       )}
 
+      {tempPassword && (
+        <div className="form-card" style={{ borderLeft: '4px solid var(--gold, #FFC72C)' }}>
+          <h2 style={{ marginTop: 0, fontSize: '1rem' }}>Temporary password for {tempPassword.name}</h2>
+          <p className="field-hint" style={{ marginTop: 0 }}>
+            Shown once. It has also been emailed, but university filtering may quarantine that
+            message — which is the situation this exists for. They will be asked to choose their
+            own password the first time they sign in.
+          </p>
+          <code style={{ fontSize: '1.05rem', padding: '.4rem .7rem', border: '1px solid var(--gray-200)', display: 'inline-block' }}>
+            {tempPassword.password}
+          </code>
+          <div style={{ display: 'flex', gap: '.5rem', marginTop: '.75rem' }}>
+            <button className="btn btn-secondary" style={{ padding: '4px 12px', fontSize: '.8rem' }}
+              onClick={() => navigator.clipboard?.writeText(tempPassword.password)}>Copy</button>
+            <button className="btn btn-secondary" style={{ padding: '4px 12px', fontSize: '.8rem' }}
+              onClick={() => setTempPassword(null)}>Dismiss</button>
+          </div>
+        </div>
+      )}
+
       {loading ? <p className="muted">Loading…</p> : (
         <div className="table-wrapper">
           <table className="data-table">
@@ -251,11 +338,31 @@ export function AdminUsers() {
             <tbody>
               {activeUsers.map(u => (
                 <tr key={u.id}>
-                  <td>{u.name}</td>
-                  <td>{u.email}</td>
-                  <td><span className="badge">{u.role.replace(/_/g, ' ')}</span></td>
                   <td>
-                    <span className={`badge ${u.status === 'rejected' ? 'badge--danger' : ''}`}>
+                    {editingUser === u.id ? (
+                      <input value={draft.name} onChange={e => setDraft(d => ({ ...d, name: e.target.value }))}
+                        style={{ width: '100%', minWidth: '120px' }} maxLength={150} />
+                    ) : u.name}
+                  </td>
+                  <td>
+                    {editingUser === u.id ? (
+                      <input type="email" value={draft.email}
+                        onChange={e => setDraft(d => ({ ...d, email: e.target.value }))}
+                        style={{ width: '100%', minWidth: '160px' }} maxLength={200} />
+                    ) : u.email}
+                  </td>
+                  <td>
+                    {editingUser === u.id ? (
+                      <select value={draft.role} onChange={e => setDraft(d => ({ ...d, role: e.target.value }))}>
+                        <option value="coach">Coach</option>
+                        <option value="sport_admin">Sport Admin</option>
+                        <option value="cfo">CFO</option>
+                        <option value="super_admin">Super Admin</option>
+                      </select>
+                    ) : <span className="badge">{u.role.replace(/_/g, ' ')}</span>}
+                  </td>
+                  <td>
+                    <span className={`badge ${u.status === 'rejected' || u.status === 'inactive' ? 'badge--danger' : ''}`}>
                       {u.status ?? 'active'}
                     </span>
                   </td>
@@ -296,14 +403,38 @@ export function AdminUsers() {
                   </td>
                   <td>{new Date(u.createdAt).toLocaleDateString()}</td>
                   <td>
-                    {u.email !== user?.email && (
-                      <button
-                        className="btn-remove"
-                        onClick={() => handleDelete(u.id, u.name)}
-                      >
-                        Delete
-                      </button>
-                    )}
+                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                      {editingUser === u.id ? (
+                        <>
+                          <button className="btn btn-primary" style={{ padding: '4px 10px', fontSize: '.78rem' }}
+                            onClick={() => handleSaveUser(u.id)} disabled={savingUser}>
+                            {savingUser ? 'Saving...' : 'Save'}
+                          </button>
+                          <button className="btn btn-secondary" style={{ padding: '4px 10px', fontSize: '.78rem' }}
+                            onClick={() => setEditingUser(null)}>Cancel</button>
+                        </>
+                      ) : (
+                        <>
+                          <button className="btn btn-secondary" style={{ padding: '4px 10px', fontSize: '.78rem' }}
+                            onClick={() => startEditUser(u)}>Edit</button>
+                          <button className="btn btn-secondary" style={{ padding: '4px 10px', fontSize: '.78rem' }}
+                            onClick={() => handleResetPassword(u)} disabled={busyUser === u.id}>
+                            Reset password
+                          </button>
+                          {u.email !== user?.email && (
+                            <button className="btn btn-secondary" style={{ padding: '4px 10px', fontSize: '.78rem' }}
+                              onClick={() => handleToggleStatus(u)} disabled={busyUser === u.id}>
+                              {(u.status ?? 'active') === 'active' ? 'Deactivate' : 'Reactivate'}
+                            </button>
+                          )}
+                          {u.email !== user?.email && (
+                            <button className="btn-remove" onClick={() => handleDelete(u.id, u.name)}>
+                              Delete
+                            </button>
+                          )}
+                        </>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}

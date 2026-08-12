@@ -14,7 +14,22 @@ export interface Env {
   /** Monitored mailbox for replies. Mail with no reply path scores badly with filters. */
   REPLY_TO_EMAIL?: string;
   APP_BASE_URL: string;
-  CFO_EMAIL: string;
+  /**
+   * Last-resort recipient when no active CFO account exists, and the visible contact in
+   * every footer. A role address, never a person: getCfoEmails() returns [] on an empty
+   * roster and notifyPendingCFO would otherwise send to nobody, silently.
+   */
+  FALLBACK_NOTIFICATION_EMAIL: string;
+
+  /**
+   * Forces the mail mode regardless of app_settings. Set on env.preview so a preview
+   * build cannot mail anyone — as a var it survives someone adding RESEND_API_KEY and
+   * survives restoring a production database into the preview D1.
+   */
+  MAIL_LOCKED_MODE?: string;
+  MAIL_TEST_ADDRESS?: string;
+  /** Stamped by getConfiguredEnv so the normal path costs no extra D1 read. */
+  MAIL_POLICY?: MailPolicy;
 }
 
 export interface EmailData {
@@ -128,7 +143,7 @@ function emailHtml(
   footer: string = FOOTER_REQUEST,
 ): string {
   const base = env.APP_BASE_URL.replace(/\/$/, '');
-  const replyTo = env.REPLY_TO_EMAIL || env.CFO_EMAIL;
+  const replyTo = env.REPLY_TO_EMAIL || env.FALLBACK_NOTIFICATION_EMAIL;
   const cell = `font-family:${FONT};color:${INK};font-size:15px;line-height:1.6`;
 
   return `<!DOCTYPE html>
@@ -210,7 +225,7 @@ function emailText(
 ): string {
   const out = [title, '', ...lines];
   if (actionLink) out.push('', `${actionLabel}: ${actionLink}`);
-  out.push('', '---', footer, `Questions: ${env.REPLY_TO_EMAIL || env.CFO_EMAIL}`);
+  out.push('', '---', footer, `Questions: ${env.REPLY_TO_EMAIL || env.FALLBACK_NOTIFICATION_EMAIL}`);
   return out.join('\n');
 }
 
@@ -284,20 +299,112 @@ interface SendOptions {
  */
 async function logEmail(
   env: Env, to: string, subject: string, template: string,
-  status: 'sent' | 'failed' | 'skipped',
+  status: 'sent' | 'failed' | 'skipped' | 'suppressed',
   providerId?: string | null, error?: string | null, requestId?: string,
+  redirectedTo?: string | null,
 ): Promise<void> {
   try {
     await env.DB.prepare(
-      `INSERT INTO email_log (id, request_id, to_email, subject, template, provider_id, status, error)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO email_log (id, request_id, to_email, subject, template, provider_id, status, error, redirected_to)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       crypto.randomUUID(), requestId ?? null, to, subject, template,
       providerId ?? null, status, error ? error.slice(0, 1000) : null,
+      redirectedTo ?? null,
     ).run();
   } catch (e) {
     console.warn(`[email] log write failed: ${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+// ── Mail safety mode ──────────────────────────────────────────────────────────
+
+export type MailMode = 'live' | 'redirect' | 'suppress';
+
+export interface MailPolicy {
+  mode: MailMode;
+  /** Sole recipient in redirect mode. Empty otherwise. */
+  testAddress: string;
+  /** Why the effective mode differs from the stored one, recorded in email_log. */
+  reason: string | null;
+  /** True when env.MAIL_LOCKED_MODE forced it and Settings cannot loosen it. */
+  locked: boolean;
+}
+
+export const MAIL_MODES: MailMode[] = ['live', 'redirect', 'suppress'];
+
+const MAIL_ADDRESS_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Decide what sendEmail is allowed to do. This function must never throw.
+ *
+ * sendEmail only wraps the provider fetch in try/catch, so a throw before that point
+ * escapes to deferNotify's handler and produces no email_log row at all — a silent hole
+ * exactly like the one this feature exists to close. Every failure path below therefore
+ * resolves to `suppress`, which is the safe direction: worst case mail stops and the
+ * reason is written to the log where someone can see it.
+ *
+ * Precedence:
+ *   1. env.MAIL_LOCKED_MODE   — a var, so Settings cannot loosen it and neither can
+ *                               restoring a production database into preview.
+ *   2. app_settings.mail_mode — the operator's choice, default live.
+ *   3. a lapsed expiry reverts to live.
+ *   4. redirect with no valid test address degrades to suppress. It fails closed.
+ */
+export async function resolveMailPolicy(env: Env): Promise<MailPolicy> {
+  try {
+    if (env.MAIL_POLICY) return env.MAIL_POLICY;
+
+    const locked = (env.MAIL_LOCKED_MODE ?? '').trim() as MailMode;
+    if (MAIL_MODES.includes(locked)) {
+      return {
+        mode: locked, testAddress: (env.MAIL_TEST_ADDRESS ?? '').trim(),
+        reason: 'Locked by MAIL_LOCKED_MODE', locked: true,
+      };
+    }
+
+    const { results } = await env.DB.prepare(
+      `SELECT setting_key, setting_value FROM app_settings
+       WHERE setting_key IN ('mail_mode', 'mail_test_address', 'mail_mode_expires_at')`
+    ).all<{ setting_key: string; setting_value: string }>();
+    const map = new Map(results.map(r => [r.setting_key, r.setting_value]));
+
+    const stored = (map.get('mail_mode') ?? 'live').trim() as MailMode;
+    let mode: MailMode = MAIL_MODES.includes(stored) ? stored : 'live';
+    const testAddress = (map.get('mail_test_address') ?? '').trim();
+    let reason: string | null = null;
+
+    const expiresAt = (map.get('mail_mode_expires_at') ?? '').trim();
+    if (mode !== 'live' && expiresAt && Date.parse(expiresAt) <= Date.now()) {
+      return { mode: 'live', testAddress: '', reason: 'Test mode expired', locked: false };
+    }
+
+    if (mode === 'redirect' && !MAIL_ADDRESS_RE.test(testAddress)) {
+      mode = 'suppress';
+      reason = 'Redirect mode has no valid test address — suppressed rather than delivered';
+    }
+
+    return { mode, testAddress, reason, locked: false };
+  } catch (e) {
+    return {
+      mode: 'suppress', testAddress: '', locked: false,
+      reason: `Mail policy unavailable: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+}
+
+function redirectBannerHtml(intended: string[], testAddress: string): string {
+  return `<div style="background:#FFF4CE;border-bottom:2px solid #C9A227;padding:12px 16px;`
+    + `font-family:${FONT};font-size:13px;line-height:1.5;color:#4A3B00">`
+    + `<strong>Test mode.</strong> This portal is redirecting mail to `
+    + `${escapeHtml(testAddress)}. In production this message would have gone to `
+    + `${escapeHtml(intended.join(', '))}.</div>`;
+}
+
+function redirectBannerText(intended: string[], testAddress: string): string {
+  return `*** TEST MODE — redirected to ${testAddress} ***\n`
+    + `In production this message would have gone to: ${intended.join(', ')}\n`
+    + '─────────────────────────────────────────────';
 }
 
 async function sendEmail(
@@ -311,15 +418,50 @@ async function sendEmail(
   const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean);
   if (recipients.length === 0) return;
 
-  if (!env.RESEND_API_KEY) {
-    console.log(`[EMAIL SKIPPED — no RESEND_API_KEY] To: ${recipients.join(', ')} | Subject: ${subject}`);
+  // The safety gate sits ahead of the API-key check on purpose: `suppress` must hold even
+  // when a key is present, and `redirect` still degrades into the no-key branch below.
+  // This is the only place a message can reach the provider, so it is the only place the
+  // mode has to be enforced — no template can route around it.
+  const policy = await resolveMailPolicy(env);
+
+  if (policy.mode === 'suppress') {
+    console.log(`[EMAIL SUPPRESSED] To: ${recipients.join(', ')} | Subject: ${subject}`);
     for (const r of recipients) {
-      await logEmail(env, r, subject, opts.template, 'skipped', null, 'RESEND_API_KEY not configured', opts.requestId);
+      await logEmail(env, r, subject, opts.template, 'suppressed', null,
+        policy.reason ?? 'Portal mail is suppressed', opts.requestId);
     }
     return;
   }
 
-  const unsubscribe = `mailto:${env.REPLY_TO_EMAIL || env.CFO_EMAIL}?subject=unsubscribe`;
+  const redirecting = policy.mode === 'redirect';
+  const envelope = redirecting ? [policy.testAddress] : recipients;
+  const redirectedTo = redirecting ? policy.testAddress : null;
+
+  if (!env.RESEND_API_KEY) {
+    console.log(`[EMAIL SKIPPED — no RESEND_API_KEY] To: ${recipients.join(', ')} | Subject: ${subject}`);
+    for (const r of recipients) {
+      await logEmail(env, r, subject, opts.template, 'skipped', null, 'RESEND_API_KEY not configured', opts.requestId, redirectedTo);
+    }
+    return;
+  }
+
+  let outSubject = subject;
+  let outHtml = html;
+  let outText = text;
+
+  if (redirecting) {
+    // The deliverability notes above forbid bracketed subject prefixes — that reasoning is
+    // about production. Here the only recipient is a tester's inbox, where knowing who the
+    // message was for is the most useful thing on the row.
+    outSubject = `[TEST → ${recipients.join(', ')}] ${subject}`;
+    const banner = redirectBannerHtml(recipients, policy.testAddress);
+    outHtml = /<body[^>]*>/i.test(html)
+      ? html.replace(/(<body[^>]*>)/i, `$1${banner}`)
+      : banner + html;
+    outText = `${redirectBannerText(recipients, policy.testAddress)}\n\n${text}`;
+  }
+
+  const unsubscribe = `mailto:${env.REPLY_TO_EMAIL || env.FALLBACK_NOTIFICATION_EMAIL}?subject=unsubscribe`;
 
   // Email delivery is best-effort: a provider or configuration problem must never break
   // the approval flow. Every outcome is recorded in email_log either way.
@@ -332,11 +474,11 @@ async function sendEmail(
       },
       body: JSON.stringify({
         from: `${(env.FROM_NAME || 'Athletics Business Office').trim()} <${env.FROM_EMAIL}>`,
-        to: recipients,
+        to: envelope,
         ...(env.REPLY_TO_EMAIL ? { reply_to: env.REPLY_TO_EMAIL } : {}),
-        subject,
-        html,
-        text,
+        subject: outSubject,
+        html: outHtml,
+        text: outText,
         headers: {
           'List-Unsubscribe': `<${unsubscribe}>`,
           'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
@@ -345,24 +487,27 @@ async function sendEmail(
       }),
     });
 
+    // Every log row below is keyed on the INTENDED recipient, not the envelope, so the
+    // fan-out record stays truthful under redirect and "did the head coach get it" keeps
+    // its meaning. redirected_to carries where it actually went.
     if (!res.ok) {
       const body = await res.text().catch(() => res.statusText);
-      console.warn(`[email] send to ${recipients.join(', ')} returned ${res.status}: ${body}`);
+      console.warn(`[email] send to ${envelope.join(', ')} returned ${res.status}: ${body}`);
       for (const r of recipients) {
-        await logEmail(env, r, subject, opts.template, 'failed', null, `${res.status}: ${body}`, opts.requestId);
+        await logEmail(env, r, subject, opts.template, 'failed', null, `${res.status}: ${body}`, opts.requestId, redirectedTo);
       }
       return;
     }
 
     const payload = await res.json<{ id?: string }>().catch(() => ({} as { id?: string }));
     for (const r of recipients) {
-      await logEmail(env, r, subject, opts.template, 'sent', payload.id ?? null, null, opts.requestId);
+      await logEmail(env, r, subject, opts.template, 'sent', payload.id ?? null, null, opts.requestId, redirectedTo);
     }
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     console.warn(`[email] send failed: ${message}`);
     for (const r of recipients) {
-      await logEmail(env, r, subject, opts.template, 'failed', null, message, opts.requestId);
+      await logEmail(env, r, subject, opts.template, 'failed', null, message, opts.requestId, redirectedTo);
     }
   }
 }
@@ -374,14 +519,14 @@ export function allPartyRecipients(env: Env, d: EmailData): string[] {
     d.headCoachEmail,
     ...(d.sportAdminEmails ?? []),
     d.sportAdminEmail,
-    ...(d.cfoEmails?.length ? d.cfoEmails : [env.CFO_EMAIL]),
+    ...(d.cfoEmails?.length ? d.cfoEmails : [env.FALLBACK_NOTIFICATION_EMAIL]),
   ].filter((e): e is string => !!e);
   return [...new Set(list.map(e => e.toLowerCase()))];
 }
 
 /** CFO recipients for a message: the resolved user list, else the env fallback. */
 function cfoRecipients(env: Env, d: EmailData): string[] {
-  return d.cfoEmails?.length ? d.cfoEmails : [env.CFO_EMAIL].filter(Boolean);
+  return d.cfoEmails?.length ? d.cfoEmails : [env.FALLBACK_NOTIFICATION_EMAIL].filter(Boolean);
 }
 
 // ── .ics calendar reminder ────────────────────────────────────────────────────
@@ -668,5 +813,37 @@ export async function notifyRegistrationDecision(
     emailHtml(env, subject, `<p>Hi ${escapeHtml(name)},</p><p>${escapeHtml(intro)}</p>`, link, 'Sign in', FOOTER_ACCOUNT),
     emailText(env, subject, [`Hi ${name},`, '', intro], link, 'Sign in here', FOOTER_ACCOUNT),
     { template: approved ? 'notifyRegistrationApproved' : 'notifyRegistrationRejected' },
+  );
+}
+
+/**
+ * A configuration check the operator can trigger from Settings.
+ *
+ * Routed through the ordinary sendEmail path on purpose: it proves the From address, the
+ * DNS, and the current mail mode all at once, rather than testing a path nothing else uses.
+ * Under suppress it sends nothing and says so in the log, which is itself the useful answer.
+ */
+export async function notifyTestMessage(env: Env, to: string, requestedBy: string): Promise<void> {
+  const subject = 'Athletics Insurance Portal configuration test';
+  const intro = 'This is a configuration test from the University of Toledo Athletics Insurance '
+    + 'Portal. If you are reading it, the portal can reach this address.';
+  const detail = `Requested by ${requestedBy}. No action is needed.`;
+  await sendEmail(
+    env, to, subject,
+    emailHtml(
+      env, subject,
+      `<p style="margin:0 0 14px">${escapeHtml(intro)}</p>`
+      + recordTable([
+        ['From address', escapeHtml(env.FROM_EMAIL)],
+        ['Reply-To', escapeHtml(env.REPLY_TO_EMAIL || env.FALLBACK_NOTIFICATION_EMAIL)],
+        ['Portal', escapeHtml(env.APP_BASE_URL)],
+      ])
+      + `<p style="margin:0;color:${MUTED};font-size:13.5px">${escapeHtml(detail)}</p>`,
+      undefined, undefined, FOOTER_ACCOUNT,
+    ),
+    emailText(env, subject, [intro, '', `From address: ${env.FROM_EMAIL}`,
+      `Reply-To: ${env.REPLY_TO_EMAIL || env.FALLBACK_NOTIFICATION_EMAIL}`,
+      `Portal: ${env.APP_BASE_URL}`, '', detail], undefined, undefined, FOOTER_ACCOUNT),
+    { template: 'notifyTestMessage' },
   );
 }

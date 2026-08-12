@@ -19,8 +19,43 @@ import { AuditLog } from './pages/AuditLog';
 import { AdminUsers } from './pages/admin/Users';
 import { AdminSports } from './pages/admin/Sports';
 import { AdminSettingsPage } from './pages/admin/Settings';
+import { AdminOnboarding } from './pages/admin/Onboarding';
 import { SessionTimeout } from './components/SessionTimeout';
 import { ErrorBoundary } from './components/ErrorBoundary';
+
+/**
+ * A standing, non-dismissible notice that portal email is not being delivered.
+ *
+ * Shown to every signed-in user rather than only to administrators. Test mode used to mean
+ * `wrangler secret delete RESEND_API_KEY`, which left no trace anywhere in the product —
+ * so the only way to discover mail was off was to notice that nothing arrived, which is
+ * indistinguishable from the deliverability problems this portal already has.
+ */
+function MailModeBanner({ user }: { user: User }) {
+  if (!user.mailMode || user.mailMode === 'live') return null;
+
+  const privileged = user.role === 'super_admin' || user.role === 'cfo';
+  const what = user.mailMode === 'redirect'
+    ? `being redirected${user.mailTestAddress ? ` to ${user.mailTestAddress}` : ''}`
+    : 'switched off';
+
+  return (
+    <div
+      role="status"
+      style={{
+        background: '#FFF4CE', borderBottom: '2px solid #C9A227', color: '#4A3B00',
+        padding: '.6rem 1rem', fontSize: '.85rem', lineHeight: 1.5, textAlign: 'center',
+      }}
+    >
+      <strong>Test mode.</strong>{' '}
+      Portal email is {what}, so nobody is receiving notifications.
+      {privileged && user.mailModeSetBy ? ` Enabled by ${user.mailModeSetBy}.` : ''}
+      {privileged && !user.mailModeLocked && (
+        <> <Link to="/admin/settings" style={{ color: '#4A3B00', fontWeight: 600 }}>Change this</Link>.</>
+      )}
+    </div>
+  );
+}
 
 function Nav({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -70,6 +105,7 @@ function Nav({ user, onLogout }: { user: User; onLogout: () => void }) {
         {isAdmin && <Link className={cls('/admin/users')} to="/admin/users">Users</Link>}
         {user.role === 'super_admin' && <Link className={cls('/admin/sports')} to="/admin/sports">Sports &amp; Coaches</Link>}
         {user.role === 'super_admin' && <Link className={cls('/admin/settings')} to="/admin/settings">Settings</Link>}
+        {user.role === 'super_admin' && <Link className={cls('/admin/setup')} to="/admin/setup">Setup</Link>}
 
         {/* Mobile-only: user identity + sign-out inside open drawer */}
         <div className="navbar-mobile-user">
@@ -144,6 +180,7 @@ function AppLayout() {
   return (
     <AuthContext.Provider value={{ user, loading, selectIdentity, login, logout, refresh }}>
       {user && !mustChangePassword && <Nav user={user} onLogout={logout} />}
+      {user && <MailModeBanner user={user} />}
       {user && <SessionTimeout onTimeout={logout} />}
       <main className="main-content">
         <Routes>
@@ -163,6 +200,7 @@ function AppLayout() {
           <Route path="/admin/users" element={requireAuth(<AdminUsers />)} />
           <Route path="/admin/sports" element={requireAuth(<AdminSports />)} />
           <Route path="/admin/settings" element={requireAuth(<AdminSettingsPage />)} />
+          <Route path="/admin/setup" element={requireAuth(<AdminOnboarding />)} />
           <Route path="/" element={<Navigate to={user ? '/dashboard' : '/login'} replace />} />
           <Route path="*" element={<NotFound signedIn={!!user} />} />
         </Routes>
