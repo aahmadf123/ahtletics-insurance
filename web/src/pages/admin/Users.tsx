@@ -33,7 +33,7 @@ export function AdminUsers() {
   // address or an administrator who was promoted had to be deleted and recreated — losing
   // their sport assignments in the process.
   const [editingUser, setEditingUser] = useState<string | null>(null);
-  const [draft, setDraft] = useState({ name: '', email: '', role: '' });
+  const [draft, setDraft] = useState({ name: '', email: '', role: '', sportId: '' });
   const [savingUser, setSavingUser] = useState(false);
   // Shown once, on screen, because the message carrying it may be quarantined.
   const [tempPassword, setTempPassword] = useState<{ name: string; password: string } | null>(null);
@@ -98,7 +98,7 @@ export function AdminUsers() {
         password: newPassword,
         name: newName.trim(),
         role: newRole,
-        sportId: newRole === 'coach' && newSportId ? newSportId : undefined,
+        sportId: newRole === 'coach' ? newSportId : undefined,
         sportIds: newRole === 'sport_admin' ? [...newSportIds] : undefined,
       });
       setUsers(prev => [...prev, created]);
@@ -113,7 +113,7 @@ export function AdminUsers() {
 
   const startEditUser = (u: AdminUser) => {
     setEditingUser(u.id);
-    setDraft({ name: u.name, email: u.email, role: u.role });
+    setDraft({ name: u.name, email: u.email, role: u.role, sportId: u.sportId ?? '' });
     setError('');
   };
 
@@ -121,7 +121,10 @@ export function AdminUsers() {
     setSavingUser(true);
     setError('');
     try {
-      await updateUser(id, { name: draft.name.trim(), email: draft.email.trim(), role: draft.role });
+      await updateUser(id, {
+        name: draft.name.trim(), email: draft.email.trim(), role: draft.role,
+        sportId: draft.role === 'coach' ? draft.sportId || null : undefined,
+      });
       setEditingUser(null);
       refresh();
     } catch (err: unknown) {
@@ -237,11 +240,15 @@ export function AdminUsers() {
           </div>
           {newRole === 'coach' && (
             <div className="field">
-              <label>Sport (optional)</label>
-              <select value={newSportId} onChange={e => setNewSportId(e.target.value)}>
+              <label>Sport *</label>
+              <select value={newSportId} onChange={e => setNewSportId(e.target.value)} required>
                 <option value="">— Select Sport —</option>
                 {sports.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
+              <p className="field-hint">
+                The coach joins this sport's roster automatically and appears on the
+                request form's coach picker.
+              </p>
             </div>
           )}
           {newRole === 'sport_admin' && (
@@ -258,7 +265,8 @@ export function AdminUsers() {
             </div>
           )}
           {createError && <p className="error">{createError}</p>}
-          <button type="submit" className="btn btn-primary" disabled={creating}>
+          <button type="submit" className="btn btn-primary"
+            disabled={creating || (newRole === 'coach' && !newSportId)}>
             {creating ? 'Creating…' : 'Create User'}
           </button>
         </form>
@@ -353,12 +361,20 @@ export function AdminUsers() {
                   </td>
                   <td>
                     {editingUser === u.id ? (
-                      <select value={draft.role} onChange={e => setDraft(d => ({ ...d, role: e.target.value }))}>
-                        <option value="coach">Coach</option>
-                        <option value="sport_admin">Sport Admin</option>
-                        <option value="cfo">CFO</option>
-                        <option value="super_admin">Super Admin</option>
-                      </select>
+                      <div style={{ display: 'grid', gap: '4px' }}>
+                        <select value={draft.role} onChange={e => setDraft(d => ({ ...d, role: e.target.value }))}>
+                          <option value="coach">Coach</option>
+                          <option value="sport_admin">Sport Admin</option>
+                          <option value="cfo">CFO</option>
+                          <option value="super_admin">Super Admin</option>
+                        </select>
+                        {draft.role === 'coach' && (
+                          <select value={draft.sportId} onChange={e => setDraft(d => ({ ...d, sportId: e.target.value }))}>
+                            <option value="">— Select Sport —</option>
+                            {sports.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                          </select>
+                        )}
+                      </div>
                     ) : <span className="badge">{u.role.replace(/_/g, ' ')}</span>}
                   </td>
                   <td>
@@ -407,7 +423,8 @@ export function AdminUsers() {
                       {editingUser === u.id ? (
                         <>
                           <button className="btn btn-primary" style={{ padding: '4px 10px', fontSize: '.78rem' }}
-                            onClick={() => handleSaveUser(u.id)} disabled={savingUser}>
+                            onClick={() => handleSaveUser(u.id)}
+                            disabled={savingUser || (draft.role === 'coach' && !draft.sportId)}>
                             {savingUser ? 'Saving...' : 'Save'}
                           </button>
                           <button className="btn btn-secondary" style={{ padding: '4px 10px', fontSize: '.78rem' }}

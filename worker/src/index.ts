@@ -393,6 +393,58 @@ async function syncAdministratorMirror(env: Env, userId: string): Promise<void> 
 }
 
 /**
+ * Keep a coach account's roster entry in step with its users row.
+ *
+ * The exact counterpart of syncAdministratorMirror, for the third roster. Creating a coach
+ * account used to leave the `coaches` table untouched, so the Sports page made the Super
+ * Admin re-type the same person — the two-rosters defect all over again. The roster row
+ * shares the users.id, and the account is the source of truth for name and email: editing
+ * a mirrored row from the Sports modal works, but the next account edit overwrites it.
+ *
+ * Removal matters more than creation. `coaches` is what routes step-1 approval requests,
+ * so a deactivated, demoted, deleted, or re-sported head coach must drop out of it — and
+ * the sport's denormalised head-coach columns must be resynced or the request form keeps
+ * offering an address that no longer answers.
+ */
+async function syncCoachMirror(env: Env, userId: string): Promise<void> {
+  const u = await env.DB.prepare(
+    'SELECT name, email, role, status, sport_id FROM users WHERE id = ?'
+  ).bind(userId).first<{ name: string; email: string; role: string; status: string | null; sport_id: string | null }>();
+  const existing = await env.DB.prepare(
+    'SELECT sport_id, is_head_coach FROM coaches WHERE id = ?'
+  ).bind(userId).first<{ sport_id: string; is_head_coach: number }>();
+
+  const isRosterable = u && u.role === 'coach' && (u.status ?? 'active') === 'active' && !!u.sport_id;
+  if (!isRosterable) {
+    if (existing) {
+      await env.DB.prepare('DELETE FROM coaches WHERE id = ?').bind(userId).run();
+      if (existing.is_head_coach) await syncHeadCoachColumns(env, existing.sport_id);
+    }
+    return;
+  }
+
+  // Moving sports cannot carry the head-coach flag along: the new sport may already have
+  // one, and being head coach of a sport is an appointment, not a property of the person.
+  const sportChanged = !!existing && existing.sport_id !== u.sport_id;
+  await env.DB.prepare(`
+    INSERT INTO coaches (id, display_name, email, sport_id, title, is_head_coach)
+    VALUES (?, ?, ?, ?, 'Assistant Coach', 0)
+    ON CONFLICT(id) DO UPDATE SET
+      display_name = excluded.display_name,
+      email = excluded.email,
+      sport_id = excluded.sport_id,
+      is_head_coach = CASE WHEN coaches.sport_id = excluded.sport_id THEN coaches.is_head_coach ELSE 0 END,
+      title = CASE WHEN coaches.sport_id = excluded.sport_id THEN coaches.title ELSE 'Assistant Coach' END,
+      delegated_approver_email = CASE WHEN coaches.sport_id = excluded.sport_id THEN coaches.delegated_approver_email ELSE NULL END,
+      delegation_expires_at = CASE WHEN coaches.sport_id = excluded.sport_id THEN coaches.delegation_expires_at ELSE NULL END
+  `).bind(userId, u.name, u.email, u.sport_id).run();
+
+  if (sportChanged && existing.is_head_coach) await syncHeadCoachColumns(env, existing.sport_id);
+  // A renamed or re-emailed head coach must flow through to the cached columns too.
+  if (u.sport_id) await syncHeadCoachColumns(env, u.sport_id);
+}
+
+/**
  * Recompute single_approval for every sport this account is the designated administrator
  * of. Needed whenever their role or status changes: a deactivated or demoted CFO must stop
  * being able to finalize a request on one signature.
@@ -2013,6 +2065,9 @@ app.post('/api/admin/users', async c => {
   if (!['coach', 'sport_admin', 'cfo', 'super_admin'].includes(role)) return err('Invalid role');
   if (password.length < 8) return err('Password must be at least 8 characters');
   if (role === 'sport_admin' && !(sportIds?.length)) return err('Select at least one sport for this Sport Admin');
+  // Same rule /auth/setup has always enforced. A coach with no sport is half-configured:
+  // they can sign in but their requests have no roster to resolve against.
+  if (role === 'coach' && !sportId) return err('Select a sport for this coach');
 
   const exists = await c.env.DB.prepare('SELECT id FROM users WHERE email = ?')
     .bind(email.toLowerCase()).first();
@@ -2027,6 +2082,7 @@ app.post('/api/admin/users', async c => {
   if (role === 'sport_admin') await setSportAdminAssignments(c.env, id, sportIds ?? []);
 
   await syncAdministratorMirror(c.env, id);
+  await syncCoachMirror(c.env, id);
 
   // Best-effort: the account exists whether or not the message lands, and the outcome is
   // recorded in email_log either way.
@@ -2105,14 +2161,14 @@ app.put('/api/admin/users/:id', async c => {
   if (nextRole === 'sport_admin' && body.sportIds && !body.sportIds.length) {
     return err('Select at least one sport for this Sport Admin');
   }
+  // A role change to coach must land with a sport, or a demoted administrator becomes
+  // the sportless coach the create path refuses.
+  const nextSportId = nextRole === 'coach' ? (body.sportId ?? target.sport_id) : null;
+  if (nextRole === 'coach' && !nextSportId) return err('Select a sport for this coach');
 
   await c.env.DB.prepare(
     'UPDATE users SET name = ?, email = ?, role = ?, sport_id = ? WHERE id = ?'
-  ).bind(
-    nextName, nextEmail, nextRole,
-    nextRole === 'coach' ? (body.sportId ?? target.sport_id) : null,
-    id,
-  ).run();
+  ).bind(nextName, nextEmail, nextRole, nextSportId, id).run();
 
   // Assignments only mean anything for a sport admin; clear them on any other role so a
   // demoted account stops appearing in that sport's notification fan-out.
@@ -2123,6 +2179,7 @@ app.put('/api/admin/users/:id', async c => {
   }
 
   await syncAdministratorMirror(c.env, id);
+  await syncCoachMirror(c.env, id);
   await resyncSportsForAdministrator(c.env, id);
   await audit(c.env, null, 'USER_UPDATED', user.email, {
     userId: id,
@@ -2215,8 +2272,10 @@ app.put('/api/admin/users/:id/status', async c => {
     .bind(status, (target.token_version ?? 0) + (status === 'inactive' ? 1 : 0), id).run();
 
   // A deactivated CFO must stop finalizing requests on a single signature, and the status
-  // filters in the resolvers stop them being notified.
+  // filters in the resolvers stop them being notified. A deactivated coach leaves the
+  // sport roster the same way — that table routes step-1 approvals.
   await resyncSportsForAdministrator(c.env, id);
+  await syncCoachMirror(c.env, id);
   await audit(c.env, null, status === 'active' ? 'USER_REACTIVATED' : 'USER_DEACTIVATED',
     user.email, { userId: id, email: target.email }, clientIp(c));
 
@@ -2258,16 +2317,24 @@ app.delete('/api/admin/users/:id', async c => {
     'SELECT id FROM sports_programs WHERE sport_admin_id = ?'
   ).bind(id).all<{ id: string }>();
 
+  // A mirrored coach row goes with the account; if they were the head coach, the sport's
+  // cached head-coach columns must clear or the request form keeps offering them.
+  const coachRow = await c.env.DB.prepare(
+    'SELECT sport_id, is_head_coach FROM coaches WHERE id = ?'
+  ).bind(id).first<{ sport_id: string; is_head_coach: number }>();
+
   await c.env.DB.batch([
     c.env.DB.prepare('DELETE FROM sport_admin_assignments WHERE admin_user_id = ?').bind(id),
     c.env.DB.prepare('DELETE FROM password_reset_tokens WHERE user_id = ?').bind(id),
     c.env.DB.prepare('UPDATE sports_programs SET sport_admin_id = NULL WHERE sport_admin_id = ?').bind(id),
     c.env.DB.prepare('DELETE FROM sport_administrators WHERE id = ?').bind(id),
+    c.env.DB.prepare('DELETE FROM coaches WHERE id = ?').bind(id),
     c.env.DB.prepare('DELETE FROM users WHERE id = ?').bind(id),
   ]);
 
   // Losing a CFO administrator means those sports no longer finalize on one signature.
   for (const s of orphaned) await syncSingleApproval(c.env, s.id);
+  if (coachRow?.is_head_coach) await syncHeadCoachColumns(c.env, coachRow.sport_id);
 
   return json({ ok: true });
 });
@@ -2285,6 +2352,7 @@ app.put('/api/admin/users/:id/approve', async c => {
   await c.env.DB.prepare('UPDATE users SET status = ? WHERE id = ? AND status = ?')
     .bind('active', id, 'pending').run();
   await syncAdministratorMirror(c.env, id);
+  await syncCoachMirror(c.env, id);
   await resyncSportsForAdministrator(c.env, id);
   await audit(c.env, null, 'USER_APPROVED', user.email, { userId: id, email: target.email }, clientIp(c));
   deferNotify(c, mailEnv => notifyRegistrationDecision(mailEnv, target.email, target.name, true));
@@ -2305,6 +2373,7 @@ app.put('/api/admin/users/:id/reject', async c => {
   await c.env.DB.prepare('UPDATE users SET status = ?, token_version = ? WHERE id = ?')
     .bind('rejected', (target.token_version ?? 0) + 1, id).run();
   await resyncSportsForAdministrator(c.env, id);
+  await syncCoachMirror(c.env, id);
   await audit(c.env, null, 'USER_REJECTED', user.email, { userId: id, email: target.email }, clientIp(c));
   deferNotify(c, mailEnv => notifyRegistrationDecision(mailEnv, target.email, target.name, false));
   return json({ ok: true });

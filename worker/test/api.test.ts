@@ -995,8 +995,10 @@ describe('turnover is serviceable without SQL', () => {
     });
     const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
 
+    // Demotion to coach must land with a sport now — the rule this release adds.
     await call(`/api/admin/users/${admin.id}`, {
-      method: 'PUT', cookie: boss.cookie, body: JSON.stringify({ role: 'coach' }),
+      method: 'PUT', cookie: boss.cookie,
+      body: JSON.stringify({ role: 'coach', sportId: 'womens_soccer' }),
     });
 
     const sport = await env.DB.prepare("SELECT sport_admin_id FROM sports_programs WHERE id = 'womens_soccer'")
@@ -1039,5 +1041,99 @@ describe('turnover is serviceable without SQL', () => {
     expect((await call(`/api/admin/users/${boss.id}`, {
       method: 'PUT', cookie: boss.cookie, body: JSON.stringify({ role: 'coach' }),
     })).status).toBe(409);
+  });
+});
+
+describe('coach accounts are the sport roster', () => {
+  // Creating a coach account used to leave the coaches table untouched, so the Sports
+  // page made the Super Admin re-type the same person — and the account's sport was
+  // optional, producing coaches whose requests had no roster to resolve against.
+  const createCoach = async (bossCookie: string, email: string, sportId?: string) =>
+    call('/api/admin/users', {
+      method: 'POST', cookie: bossCookie,
+      body: JSON.stringify({
+        email, password: 'temp-password-1', name: 'Casey Coach', role: 'coach',
+        ...(sportId ? { sportId } : {}),
+      }),
+    });
+
+  it('refuses a coach account with no sport', async () => {
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    const res = await createCoach(boss.cookie, 'coach@example.edu');
+    expect(res.status).toBe(400);
+    expect(await env.DB.prepare('SELECT id FROM users WHERE email = ?')
+      .bind('coach@example.edu').first()).toBeNull();
+  });
+
+  it('puts a new coach account on the sport roster', async () => {
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    const res = await createCoach(boss.cookie, 'coach@example.edu', 'womens_soccer');
+    expect(res.status).toBe(201);
+    const { id } = await res.json<{ id: string }>();
+
+    const roster = await (await call('/api/sports/womens_soccer/coaches', { cookie: boss.cookie }))
+      .json<{ id: string; email: string; isHeadCoach: number }[]>();
+    const mirrored = roster.find(co => co.id === id);
+    expect(mirrored).toBeTruthy();
+    expect(mirrored!.email).toBe('coach@example.edu');
+    expect(mirrored!.isHeadCoach).toBe(0);   // membership, not appointment
+  });
+
+  it('drops a deactivated head coach from the roster and clears the cached columns', async () => {
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    const { id } = await (await createCoach(boss.cookie, 'coach@example.edu', 'womens_soccer')).json<{ id: string }>();
+    // Appoint the mirrored row head coach through the ordinary Sports flow.
+    expect((await call(`/api/admin/coaches/${id}`, {
+      method: 'PUT', cookie: boss.cookie, body: JSON.stringify({ isHeadCoach: true }),
+    })).status).toBe(200);
+    expect((await env.DB.prepare("SELECT head_coach_email AS e FROM sports_programs WHERE id = 'womens_soccer'")
+      .first<{ e: string | null }>())!.e).toBe('coach@example.edu');
+
+    await call(`/api/admin/users/${id}/status`, {
+      method: 'PUT', cookie: boss.cookie, body: JSON.stringify({ status: 'inactive' }),
+    });
+
+    // The roster routes step-1 approvals; a deactivated head coach must leave it, and the
+    // sport's cached head-coach address must clear rather than keep offering them.
+    expect(await env.DB.prepare('SELECT id FROM coaches WHERE id = ?').bind(id).first()).toBeNull();
+    expect((await env.DB.prepare("SELECT head_coach_email AS e FROM sports_programs WHERE id = 'womens_soccer'")
+      .first<{ e: string | null }>())!.e).toBeNull();
+  });
+
+  it('moves the roster row when the coach changes sport, without carrying head coach along', async () => {
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    const { id } = await (await createCoach(boss.cookie, 'coach@example.edu', 'womens_soccer')).json<{ id: string }>();
+    await call(`/api/admin/coaches/${id}`, {
+      method: 'PUT', cookie: boss.cookie, body: JSON.stringify({ isHeadCoach: true }),
+    });
+
+    await call(`/api/admin/users/${id}`, {
+      method: 'PUT', cookie: boss.cookie, body: JSON.stringify({ sportId: 'womens_golf' }),
+    });
+
+    const row = await env.DB.prepare('SELECT sport_id, is_head_coach FROM coaches WHERE id = ?')
+      .bind(id).first<{ sport_id: string; is_head_coach: number }>();
+    expect(row!.sport_id).toBe('womens_golf');
+    // Head coach is an appointment on a sport, not a property of the person — golf may
+    // already have one, so the flag never travels.
+    expect(row!.is_head_coach).toBe(0);
+    expect((await env.DB.prepare("SELECT head_coach_email AS e FROM sports_programs WHERE id = 'womens_soccer'")
+      .first<{ e: string | null }>())!.e).toBeNull();
+  });
+
+  it('swaps rosters when a coach is promoted to sport administrator', async () => {
+    const boss = await seedUser({ email: 'boss@example.edu', role: 'super_admin' });
+    const { id } = await (await createCoach(boss.cookie, 'coach@example.edu', 'womens_soccer')).json<{ id: string }>();
+
+    const res = await call(`/api/admin/users/${id}`, {
+      method: 'PUT', cookie: boss.cookie,
+      body: JSON.stringify({ role: 'sport_admin', sportIds: ['womens_soccer'] }),
+    });
+    expect(res.status).toBe(200);
+
+    // One call moves them between the two rosters completely: off the coaching staff,
+    // into the administrator mirror.
+    expect(await env.DB.prepare('SELECT id FROM coaches WHERE id = ?').bind(id).first()).toBeNull();
+    expect(await env.DB.prepare('SELECT id FROM sport_administrators WHERE id = ?').bind(id).first()).toBeTruthy();
   });
 });

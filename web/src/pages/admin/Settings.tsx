@@ -33,7 +33,7 @@ const MODE_COPY: Record<MailMode, { title: string; detail: string }> = {
 };
 
 export function AdminSettingsPage() {
-  const { user } = useAuth();
+  const { user, refresh } = useAuth();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -96,6 +96,10 @@ export function AdminSettingsPage() {
       setAppBaseUrl(saved.appBaseUrl);
       setReplyTo(saved.replyTo ?? '');
       setEffective(saved.effective ?? null);
+      setSetBy(saved.mailMode !== 'live' && user ? user.email : '');
+      // The test-mode banner reads /auth/me, fetched once at app mount. Without this the
+      // ribbon outlives the mode it reports — saved to Live, still told nobody gets mail.
+      await refresh();
       setSuccess('Settings saved. New values are now used for outgoing email and portal links.');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to save settings');
@@ -228,14 +232,11 @@ export function AdminSettingsPage() {
                   checked={mailMode === mode}
                   disabled={locked}
                   onChange={() => setMailMode(mode)}
-                  style={{ marginTop: '3px' }}
                 />
                 <span>
                   <strong>{MODE_COPY[mode].title}</strong>
                   <br />
-                  <span style={{ fontWeight: 400, fontSize: '.85rem', color: 'var(--gray-600, #555)' }}>
-                    {MODE_COPY[mode].detail}
-                  </span>
+                  <span className="chip-detail">{MODE_COPY[mode].detail}</span>
                 </span>
               </label>
             ))}

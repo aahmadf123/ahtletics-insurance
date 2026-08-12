@@ -395,11 +395,26 @@ export function AdminSports() {
                 {TITLES.map(t => <option key={t} value={t}>{t}</option>)}
               </select>
             </div>
-            <label className={`checkbox-chip ${coachForm.isHeadCoach ? 'checkbox-chip--checked' : ''}`} style={{ marginBottom: '1rem' }}>
-              <input type="checkbox" checked={coachForm.isHeadCoach}
-                onChange={e => setCoachForm({ ...coachForm, isHeadCoach: e.target.checked, title: e.target.checked ? 'Head Coach' : coachForm.title })} />
-              <span>Is Head Coach? (only one per sport — toggling reassigns)</span>
-            </label>
+            {(() => {
+              // The checkbox states its consequence instead of a rule: promotion demotes
+              // the incumbent automatically, and the server refuses a direct demotion of
+              // the sitting head coach, so the only ambiguity worth resolving here is
+              // "what happens when I tick this".
+              const currentHead = (coachesBySport[coachForm.sportId] ?? [])
+                .find(co => co.isHeadCoach && co.id !== coachForm.id);
+              const headLabel = coachForm.isHeadCoach && !currentHead
+                ? 'Head coach for this sport'
+                : currentHead
+                  ? `Make head coach (replaces ${currentHead.displayName})`
+                  : 'Head coach — none assigned yet';
+              return (
+                <label className={`checkbox-chip ${coachForm.isHeadCoach ? 'checkbox-chip--checked' : ''}`} style={{ marginBottom: '1rem' }}>
+                  <input type="checkbox" checked={coachForm.isHeadCoach}
+                    onChange={e => setCoachForm({ ...coachForm, isHeadCoach: e.target.checked, title: e.target.checked ? 'Head Coach' : coachForm.title })} />
+                  <span>{headLabel}</span>
+                </label>
+              );
+            })()}
 
             {coachForm.isHeadCoach && (
               <fieldset className="fieldset" style={{ marginBottom: '1rem' }}>

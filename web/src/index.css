@@ -1649,52 +1649,107 @@ h2 {
   gap: .5rem;
 }
 
+/* Selection chips.
+   Two failed iterations taught the constraints: a 4% tint read as white, and a 10% tint
+   plus inner ring was still outweighed by the focus outline — a clicked-but-unchecked
+   chip looked MORE selected than a checked one. So the states no longer share a
+   vocabulary at all. Selected is the portal's letterhead pairing — solid navy, gold
+   check — and nothing else on the chip ever uses a fill or an outline that resembles it. */
 .checkbox-chip {
   display: flex;
   align-items: center;
-  gap: .5rem;
+  gap: .6rem;
   padding: .55rem .75rem;
   border: 1.5px solid var(--gray-200);
   border-radius: var(--radius);
   cursor: pointer;
   font-size: .85rem;
-  transition: border-color .15s, background .15s;
+  background: #fff;
+  transition: border-color .15s, background .15s, color .15s;
   min-height: 44px;
 }
 
-/* Hover stays deliberately faint. It previously used a light blue border, which was
-   near-identical to the selected border and made "is this on?" unanswerable. */
-.checkbox-chip:hover {
-  border-color: #aac4e8;
-  background: #fafbfd;
+/* The native input still carries state, focus, and the accessible name for screen
+   readers and forms — it is only visually replaced by the drawn box below. */
+.checkbox-chip input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
-/* Selected carries four cues at once — border, fill, inner ring, and text weight.
-   A single 4% background tint renders around #f7f9fc, indistinguishable from white. */
-.checkbox-chip--checked {
+/* The drawn control: an empty square (circle for radios) that becomes a gold check on
+   the navy fill. Gold-on-navy is the letterhead; selection wears the brand. */
+.checkbox-chip::before {
+  content: '';
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--gray-400);
+  border-radius: 4px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 700;
+  transition: border-color .15s, background .15s;
+}
+
+.checkbox-chip:has(input[type="radio"])::before {
+  border-radius: 50%;
+}
+
+/* Hover promises, never mimics: border only, no fill. */
+.checkbox-chip:hover {
   border-color: var(--blue);
-  background: rgba(0, 61, 165, .10);
-  box-shadow: inset 0 0 0 1px var(--blue);
-  color: var(--blue);
+}
+
+.checkbox-chip--checked {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
   font-weight: 600;
 }
 
-.checkbox-chip--checked:hover {
-  background: rgba(0, 61, 165, .15);
+.checkbox-chip--checked::before {
+  content: '✓';
+  color: var(--gold);
+  border-color: var(--gold);
+  background: transparent;
 }
 
-/* The chip is a <label> wrapping the input, so the input's own focus ring is easy to
-   miss. Lift it to the chip for keyboard users. */
-.checkbox-chip:focus-within {
+.checkbox-chip--checked:hover {
+  border-color: var(--blue-dark);
+  background: var(--blue-dark);
+}
+
+/* Secondary copy inside a chip (the Settings mode descriptions) must survive the navy
+   fill — an inline gray would vanish against it. */
+.checkbox-chip .chip-detail {
+  font-weight: 400;
+  font-size: .82rem;
+  color: var(--gray-600);
+}
+
+.checkbox-chip--checked .chip-detail {
+  color: rgba(255, 255, 255, .85);
+}
+
+/* Keyboard focus only. The previous :focus-within ring also fired on a mouse click,
+   which is exactly what made an unchecked chip look selected. */
+.checkbox-chip:has(input:focus-visible) {
   outline: 2px solid var(--blue);
   outline-offset: 2px;
 }
 
-.checkbox-chip input[type="checkbox"] {
-  accent-color: var(--blue);
-  width: 16px;
-  height: 16px;
-  flex-shrink: 0;
+@supports not selector(:has(*)) {
+  .checkbox-chip:focus-within {
+    outline: 2px solid var(--blue);
+    outline-offset: 2px;
+  }
 }
 
 /* ── Tabs ─────────────────────────────────────────────────────── */
